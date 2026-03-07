@@ -12,21 +12,45 @@ System_Ext(sbp, "СБП")
 System_Ext(coreLegacy, "Core Banking (Legacy)")
 
 System_Boundary(pp, "Платёжная платформа") {
-  Container(kong, "Kong API Gateway", "Nginx + Lua", "OIDC/JWT, mTLS, rate limit, routing, correlation-id")
-  Container(bff, "BFF / Mobile API", "REST", "Агрегация API для mobile/web")
-  Container(payments, "Payments Service", "REST + gRPC + Events", "Жизненный цикл платежа и оркестрация")
-  Container(wallet, "Wallet Service", "gRPC + Events", "Баланс, holds, списания")
-  Container(fraud, "Anti-Fraud Service", "gRPC + Events", "Онлайн-оценка риска")
-  Container(coreAcl, "Core Integration / ACL", "Events + sync adapters", "Изоляция legacy core")
-  Container(notify, "Notifications Service", "Events", "SMS/push/email")
-  Container(callbacks, "Callbacks Service", "Events + HTTP", "Доставка webhook-уведомлений мерчантам")
-  Container(provider, "Provider Integration", "gRPC/REST + adapters", "Адаптеры карточного процессинга и СБП")
+  Container_Boundary(accessLayer, "Access Layer") {
+    Container(kong, "Kong API Gateway", "Nginx + Lua", "OIDC/JWT, mTLS, rate limit, routing, correlation-id")
+    Container(bff, "BFF / Mobile API", "REST", "Агрегация API для mobile/web")
+  }
 
-  Container(messageBus, "Kafka", "Event Streaming", "Доменные события, аналитика, аудит")
-  Container(jobQueue, "RabbitMQ", "Queue", "Задачи доставки, повторы, ограничение скорости, batch")
+  Container_Boundary(paymentsCtx, "Payments Context") {
+    Container(payments, "Payments Service", "REST + gRPC + Events", "Жизненный цикл платежа и оркестрация")
+    ContainerDb(paymentsDb, "Payments DB", "PostgreSQL", "Платежи, попытки, idempotency")
+  }
 
-  ContainerDb(paymentsDb, "Payments DB", "PostgreSQL", "Платежи, попытки, idempotency")
-  ContainerDb(walletDb, "Wallet DB", "PostgreSQL", "Кошельки, holds, движения")
+  Container_Boundary(walletCtx, "Wallet Context") {
+    Container(wallet, "Wallet Service", "gRPC + Events", "Баланс, holds, списания")
+    ContainerDb(walletDb, "Wallet DB", "PostgreSQL", "Кошельки, holds, движения")
+  }
+
+  Container_Boundary(fraudCtx, "Anti-Fraud Context") {
+    Container(fraud, "Anti-Fraud Service", "gRPC + Events", "Онлайн-оценка риска")
+  }
+
+  Container_Boundary(providerCtx, "Provider Integration Context") {
+    Container(provider, "Provider Integration", "gRPC/REST + adapters", "Адаптеры карточного процессинга и СБП")
+  }
+
+  Container_Boundary(notificationsCtx, "Notifications Context") {
+    Container(notify, "Notifications Service", "Events", "SMS/push/email")
+  }
+
+  Container_Boundary(callbacksCtx, "Callbacks Context") {
+    Container(callbacks, "Callbacks Service", "Events + HTTP", "Доставка webhook-уведомлений мерчантам")
+  }
+
+  Container_Boundary(coreIntegrationCtx, "Core Integration / ACL Context") {
+    Container(coreAcl, "Core Integration / ACL", "Events + sync adapters", "Изоляция legacy core")
+  }
+
+  Container_Boundary(platformInfra, "Shared Infrastructure") {
+    Container(messageBus, "Kafka", "Event Streaming", "Доменные события, аналитика, аудит")
+    Container(jobQueue, "RabbitMQ", "Queue", "Задачи доставки, повторы, ограничение скорости, batch")
+  }
 }
 
 Rel(customer, kong, "HTTPS")
