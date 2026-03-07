@@ -1,0 +1,29 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+LAYOUT_LEFT_RIGHT()
+
+title Payment Platform - C4 Context
+
+Person(customer, "Клиент банка", "Платит и управляет операциями через мобильный и веб-банк")
+System_Ext(channels, "Мобильный и веб-банк", "Каналы обслуживания клиента")
+
+System_Boundary(bank, "Банк") {
+  System(paymentPlatform, "Платёжная платформа", "Оркестрация платежей, кошельков, антифрода, уведомлений и интеграций")
+  System_Ext(coreLegacy, "Core Banking (Legacy)", "Бухгалтерский учёт, GL, регуляторная отчётность")
+}
+
+System_Ext(cardProcessing, "Карточный процессинг", "Авторизация и проведение карточных операций")
+System_Ext(sbp, "СБП", "Платежи и переводы через СБП")
+System_Ext(merchants, "Мерчанты и партнёры", "Получают статусы платежей через callbacks")
+System_Ext(notificationProviders, "SMS/Push/Email провайдеры", "Внешние каналы доставки уведомлений")
+
+Rel(customer, channels, "Инициирует платежи и смотрит статусы", "HTTPS")
+Rel(channels, paymentPlatform, "Создание платежей, подтверждение, история, статусы", "HTTPS")
+
+Rel(paymentPlatform, cardProcessing, "Проведение операций и получение статусов", "API + webhooks")
+Rel(paymentPlatform, sbp, "Платежи и получение статусов", "API + webhooks")
+Rel(paymentPlatform, merchants, "Callbacks / webhooks о статусах", "HTTPS")
+Rel(paymentPlatform, notificationProviders, "Отправка SMS/push/email", "API")
+Rel(paymentPlatform, coreLegacy, "Проводки и учёт через ACL", "sync/async integration")
+
+@enduml
