@@ -10,11 +10,22 @@ System_Ext(idp, "OIDC Provider")
 System_Ext(cardProcessing, "Карточный процессинг")
 System_Ext(sbp, "СБП")
 System_Ext(coreLegacy, "Core Banking (Legacy)")
+System_Ext(notificationProviders, "SMS/Push/Email Providers")
 
 System_Boundary(pp, "Платёжная платформа") {
   Container_Boundary(accessLayer, "Access Layer") {
     Container(kong, "Kong API Gateway", "Nginx + Lua", "OIDC/JWT, mTLS, rate limit, routing, correlation-id")
     Container(bff, "BFF / Mobile API", "REST", "Агрегация API для mobile/web")
+  }
+
+  Container_Boundary(customerCtx, "Customer Context") {
+    Container(customerSvc, "Customer Service", "REST + Events", "Клиенты, договоры, KYC")
+    ContainerDb(customerDb, "Customer DB", "PostgreSQL", "Клиенты, договоры, KYC")
+  }
+
+  Container_Boundary(merchantCtx, "Merchant Registry Context") {
+    Container(merchantRegistry, "Merchant Registry Service", "REST + Events", "Callback endpoints, signing keys, retry policy")
+    ContainerDb(merchantDb, "Merchant Registry DB", "PostgreSQL", "Мерчанты, договоры, endpoints, ключи")
   }
 
   Container_Boundary(paymentsCtx, "Payments Context") {
@@ -47,6 +58,11 @@ System_Boundary(pp, "Платёжная платформа") {
     Container(coreAcl, "Core Integration / ACL", "Events + sync adapters", "Изоляция legacy core")
   }
 
+  Container_Boundary(analyticsCtx, "Analytics / DWH Context") {
+    Container(analytics, "Analytics Pipeline", "Kafka consumers + ETL", "Построение витрин, audit stream, выгрузки")
+    ContainerDb(analyticsDb, "Analytics Storage", "DWH", "Витрины, факты, аналитические наборы данных")
+  }
+
   Container_Boundary(platformInfra, "Shared Infrastructure") {
     Container(messageBus, "Kafka", "Event Streaming", "Доменные события, аналитика, аудит")
     Container(jobQueue, "RabbitMQ", "Queue", "Задачи доставки, повторы, ограничение скорости, batch")
@@ -55,26 +71,34 @@ System_Boundary(pp, "Платёжная платформа") {
 
 Rel(customer, kong, "HTTPS")
 Rel(merchantExt, kong, "HTTPS + mTLS")
-Rel(kong, idp, "OIDC validation", "HTTPS")
+Rel(kong, idp, "JWKS / OIDC metadata refresh", "HTTPS")
 
 Rel(kong, bff, "/mobile/*", "HTTPS sync")
 Rel(kong, payments, "/payments/*", "HTTPS sync")
 Rel(kong, callbacks, "/merchant/*", "HTTPS sync")
 
 Rel(bff, payments, "CreatePayment / GetStatus", "REST sync")
+Rel(payments, customerSvc, "GetCustomer / GetKycStatus / GetContract", "gRPC/REST sync")
+Rel(callbacks, merchantRegistry, "Resolve endpoint / signing key / retry policy", "gRPC/REST sync")
+Rel(payments, merchantRegistry, "Get merchant profile / route settings", "gRPC/REST sync")
 Rel(payments, wallet, "PlaceHold / Commit / Release", "gRPC sync")
 Rel(payments, fraud, "AssessRisk", "gRPC sync")
 Rel(payments, provider, "Authorize / Capture / Refund", "gRPC/REST sync")
 Rel(payments, coreAcl, "Accounting intent", "async event / adapter call")
 
+Rel(customerSvc, customerDb, "reads/writes")
+Rel(merchantRegistry, merchantDb, "reads/writes")
 Rel(payments, paymentsDb, "reads/writes")
 Rel(wallet, walletDb, "reads/writes")
+Rel(analytics, analyticsDb, "writes/read models")
 
 Rel(payments, messageBus, "Payment events", "async")
 Rel(wallet, messageBus, "Balance / hold events", "async")
+Rel(fraud, messageBus, "Risk assessment events", "async")
+Rel(callbacks, messageBus, "Delivery result events", "async")
 Rel(messageBus, notify, "Consume payment/fraud events", "async")
 Rel(messageBus, callbacks, "Consume PaymentStatusChanged", "async")
-Rel(messageBus, fraud, "Consume signals for models", "async")
+Rel(messageBus, analytics, "Consume payment / wallet / fraud / callback events", "async")
 Rel(messageBus, coreAcl, "Consume AccountingRequested", "async")
 
 Rel(callbacks, jobQueue, "Delivery jobs", "async")
@@ -83,6 +107,7 @@ Rel(jobQueue, callbacks, "Повторы и ограничение скорос�
 Rel(provider, cardProcessing, "Provider-specific API", "sync/async")
 Rel(provider, sbp, "SBP API", "sync/async")
 Rel(callbacks, merchantExt, "Webhook delivery", "HTTPS async")
+Rel(notify, notificationProviders, "Provider API", "HTTPS")
 Rel(coreAcl, coreLegacy, "Legacy API / protocol", "sync/async")
 
 @enduml
