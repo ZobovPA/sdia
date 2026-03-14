@@ -2,87 +2,58 @@
 !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
 LAYOUT_LEFT_RIGHT()
 
-title Payment Platform - C4 Container
+title Payment Processing - C4 Container
 
-Person(customer, "Клиент банка")
-System_Ext(merchantExt, "Мерчант / Партнёр")
-System_Ext(idp, "OIDC Provider")
-System_Ext(cardProcessing, "Карточный процессинг")
-System_Ext(sbp, "СБП")
-System_Ext(coreLegacy, "Core Banking (Legacy)")
+Person(client, "Клиент", "Mobile / Web клиент")
+System_Ext(provider, "External Provider", "Внешний платёжный провайдер")
 
-System_Boundary(pp, "Платёжная платформа") {
-  Container_Boundary(accessLayer, "Access Layer") {
-    Container(kong, "Kong API Gateway", "Nginx + Lua", "OIDC/JWT, mTLS, rate limit, routing, correlation-id")
-    Container(bff, "BFF / Mobile API", "REST", "Агрегация API для mobile/web")
+System_Boundary(paymentPlatform, "Payment Processing Platform") {
+  Container(gateway, "API Gateway", "HTTPS Gateway", "Маршрутизация внешних клиентских запросов и provider callback")
+  Container(orchestrator, "Orchestrator / API", "REST", "Стартует платёжную сагу и читает статус из query-модели")
+
+  Container_Boundary(walletBoundary, "Wallet Service") {
+    Container(walletService, "Wallet Service", "REST + Kafka", "Проверка баланса, резерв, списание, компенсация")
+    ContainerDb(walletDb, "Wallet DB", "PostgreSQL", "wallets, wallet_transactions, wallet_outbox")
   }
 
-  Container_Boundary(paymentsCtx, "Payments Context") {
-    Container(payments, "Payments Service", "REST + gRPC + Events", "Жизненный цикл платежа и оркестрация")
-    ContainerDb(paymentsDb, "Payments DB", "PostgreSQL", "Платежи, попытки, idempotency")
+  Container_Boundary(transactionBoundary, "Transaction Service") {
+    Container(transactionService, "Transaction Service", "REST + Kafka", "Технический статус платежа, интеграция с провайдером, timeout")
+    ContainerDb(transactionDb, "Transaction DB", "PostgreSQL", "payments, provider_callbacks, payment_outbox")
   }
 
-  Container_Boundary(walletCtx, "Wallet Context") {
-    Container(wallet, "Wallet Service", "gRPC + Events", "Баланс, holds, списания")
-    ContainerDb(walletDb, "Wallet DB", "PostgreSQL", "Кошельки, holds, движения")
+  Container_Boundary(callbackBoundary, "Callback Service") {
+    Container(callbackService, "Callback Service", "REST", "Принимает callback-и провайдера, валидирует и нормализует payload")
   }
 
-  Container_Boundary(fraudCtx, "Anti-Fraud Context") {
-    Container(fraud, "Anti-Fraud Service", "gRPC + Events", "Онлайн-оценка риска")
+  Container_Boundary(queryBoundary, "Payment Query Service") {
+    Container(queryService, "Payment Query Service", "REST + Kafka", "Строит read-модель платежей из событий")
+    ContainerDb(queryDb, "Query DB", "PostgreSQL", "payment_view, query_processed_events")
   }
 
-  Container_Boundary(providerCtx, "Provider Integration Context") {
-    Container(provider, "Provider Integration", "gRPC/REST + adapters", "Адаптеры карточного процессинга и СБП")
-  }
-
-  Container_Boundary(notificationsCtx, "Notifications Context") {
-    Container(notify, "Notifications Service", "Events", "SMS/push/email")
-  }
-
-  Container_Boundary(callbacksCtx, "Callbacks Context") {
-    Container(callbacks, "Callbacks Service", "Events + HTTP", "Доставка webhook-уведомлений мерчантам")
-  }
-
-  Container_Boundary(coreIntegrationCtx, "Core Integration / ACL Context") {
-    Container(coreAcl, "Core Integration / ACL", "Events + sync adapters", "Изоляция legacy core")
-  }
-
-  Container_Boundary(platformInfra, "Shared Infrastructure") {
-    Container(messageBus, "Kafka", "Event Streaming", "Доменные события, аналитика, аудит")
-    Container(jobQueue, "RabbitMQ", "Queue", "Задачи доставки, повторы, ограничение скорости, batch")
-  }
+  Container(kafka, "Kafka", "Message Broker", "PaymentInitiated, PaymentCompleted, PaymentFailed")
 }
 
-Rel(customer, kong, "HTTPS")
-Rel(merchantExt, kong, "HTTPS + mTLS")
-Rel(kong, idp, "OIDC validation", "HTTPS")
+Rel(client, gateway, "Создание платежа, история, статус", "HTTPS")
+Rel(provider, gateway, "Provider callback", "HTTPS")
 
-Rel(kong, bff, "/mobile/*", "HTTPS sync")
-Rel(kong, payments, "/payments/*", "HTTPS sync")
-Rel(kong, callbacks, "/merchant/*", "HTTPS sync")
+Rel(gateway, orchestrator, "Client API", "REST")
+Rel(gateway, callbackService, "Callback API", "REST")
 
-Rel(bff, payments, "CreatePayment / GetStatus", "REST sync")
-Rel(payments, wallet, "PlaceHold / Commit / Release", "gRPC sync")
-Rel(payments, fraud, "AssessRisk", "gRPC sync")
-Rel(payments, provider, "Authorize / Capture / Refund", "gRPC/REST sync")
-Rel(payments, coreAcl, "Accounting intent", "async event / adapter call")
+Rel(orchestrator, walletService, "reserveFunds", "REST")
+Rel(orchestrator, queryService, "GetPaymentStatus / GetUserPayments", "REST")
 
-Rel(payments, paymentsDb, "reads/writes")
-Rel(wallet, walletDb, "reads/writes")
+Rel(walletService, walletDb, "Чтение/запись")
+Rel(walletService, kafka, "PaymentInitiated", "async")
 
-Rel(payments, messageBus, "Payment events", "async")
-Rel(wallet, messageBus, "Balance / hold events", "async")
-Rel(messageBus, notify, "Consume payment/fraud events", "async")
-Rel(messageBus, callbacks, "Consume PaymentStatusChanged", "async")
-Rel(messageBus, fraud, "Consume signals for models", "async")
-Rel(messageBus, coreAcl, "Consume AccountingRequested", "async")
+Rel(kafka, transactionService, "PaymentInitiated", "async")
+Rel(kafka, walletService, "PaymentCompleted / PaymentFailed", "async")
+Rel(kafka, queryService, "PaymentInitiated / PaymentCompleted / PaymentFailed", "async")
 
-Rel(callbacks, jobQueue, "Delivery jobs", "async")
-Rel(jobQueue, callbacks, "Повторы и ограничение скорости", "async")
+Rel(transactionService, transactionDb, "Чтение/запись")
+Rel(transactionService, provider, "Initiate payment", "HTTPS")
+Rel(callbackService, transactionService, "POST /internal/provider-results", "REST")
+Rel(transactionService, kafka, "PaymentCompleted / PaymentFailed", "async")
 
-Rel(provider, cardProcessing, "Provider-specific API", "sync/async")
-Rel(provider, sbp, "SBP API", "sync/async")
-Rel(callbacks, merchantExt, "Webhook delivery", "HTTPS async")
-Rel(coreAcl, coreLegacy, "Legacy API / protocol", "sync/async")
+Rel(queryService, queryDb, "Чтение/запись")
 
 @enduml

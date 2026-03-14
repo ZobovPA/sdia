@@ -1,0 +1,43 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+LAYOUT_LEFT_RIGHT()
+
+title Wallet Service - C4 Component
+
+Container_Ext(orchestrator, "Orchestrator / API", "REST", "Вызывает reserveFunds")
+Container_Ext(kafka, "Kafka", "Message Broker", "Передаёт terminal events")
+
+Container_Boundary(walletBoundary, "Wallet Service") {
+  Component(reserveApi, "ReserveFunds API", "REST endpoint", "Принимает команду reserveFunds")
+  Component(reserveHandler, "Reserve Command Handler", "Application Service", "Проверяет баланс и создаёт RESERVED запись")
+  Component(terminalConsumer, "Terminal Event Consumer", "Kafka consumer", "Обрабатывает PaymentCompleted и PaymentFailed")
+  Component(finalizeHandler, "Finalize Command Handler", "Application Service", "Исполняет commitFunds и releaseFunds")
+  Component(walletIdempotency, "Idempotency Guard", "Application Service", "Проверяет paymentId, requestId и terminal state")
+  Component(walletRepo, "Wallet Repository", "Repository", "Читает и обновляет wallets")
+  Component(txRepo, "Wallet Transaction Repository", "Repository", "Работает с wallet_transactions")
+  Component(outboxWriter, "Outbox Writer", "Application Service", "Записывает PaymentInitiated в wallet_outbox")
+  Component(outboxPublisher, "Outbox Publisher", "Polling publisher", "Читает wallet_outbox и публикует PaymentInitiated")
+  ContainerDb(walletDb, "Wallet DB", "PostgreSQL", "wallets, wallet_transactions, wallet_outbox")
+}
+
+Rel(orchestrator, reserveApi, "reserveFunds", "REST")
+Rel(reserveApi, reserveHandler, "reserveFunds")
+Rel(reserveHandler, walletIdempotency, "check paymentId / requestId")
+Rel(reserveHandler, walletRepo, "lock wallet")
+Rel(reserveHandler, txRepo, "create RESERVED payment row")
+Rel(reserveHandler, outboxWriter, "write PaymentInitiated")
+
+Rel(kafka, terminalConsumer, "PaymentCompleted / PaymentFailed", "async")
+Rel(terminalConsumer, finalizeHandler, "terminal event")
+Rel(finalizeHandler, walletIdempotency, "check terminal state")
+Rel(finalizeHandler, walletRepo, "update balances")
+Rel(finalizeHandler, txRepo, "mark COMPLETED / CANCELLED")
+
+Rel(walletIdempotency, walletDb, "reads")
+Rel(walletRepo, walletDb, "reads/writes")
+Rel(txRepo, walletDb, "reads/writes")
+Rel(outboxWriter, walletDb, "writes")
+Rel(outboxPublisher, walletDb, "poll wallet_outbox")
+Rel(outboxPublisher, kafka, "PaymentInitiated", "async")
+
+@enduml

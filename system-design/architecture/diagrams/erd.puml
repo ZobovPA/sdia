@@ -1,0 +1,157 @@
+@startuml
+title Payment Saga - ERD
+left to right direction
+skinparam shadowing false
+skinparam linetype ortho
+
+package "Wallet DB" {
+  entity "wallets" as wallets {
+    * wallet_id : uuid
+    --
+    user_id : varchar
+    currency : char(3)
+    available_amount : bigint
+    reserved_amount : bigint
+    version : bigint
+    created_at : timestamptz
+    updated_at : timestamptz
+  }
+
+  entity "wallet_transactions" as wallet_transactions {
+    * transaction_id : uuid
+    --
+    wallet_id : uuid
+    payment_id : uuid
+    request_id : uuid
+    status : enum(RESERVED, COMPLETED, CANCELLED)
+    final_action : enum(COMMIT, RELEASE)
+    amount_value : bigint
+    currency : char(3)
+    reserved_at : timestamptz
+    finalized_at : timestamptz
+    created_at : timestamptz
+    updated_at : timestamptz
+  }
+
+  entity "wallet_outbox" as wallet_outbox {
+    * event_id : uuid
+    --
+    aggregate_type : varchar
+    aggregate_id : uuid
+    event_type : varchar
+    payload_json : jsonb
+    status : enum(NEW, SENT, FAILED)
+    created_at : timestamptz
+    published_at : timestamptz
+  }
+}
+
+package "Transaction DB" {
+  entity "payments" as payments {
+    * payment_id : uuid
+    --
+    request_id : uuid
+    user_id : varchar
+    wallet_id : uuid
+    merchant_id : varchar
+    merchant_order_id : varchar
+    provider_id : varchar
+    recipient_account : varchar
+    provider_txn_id : varchar
+    provider_status : varchar
+    status : enum(PROVIDER_PENDING, COMPLETED, FAILED, TIMEOUT)
+    amount_value : bigint
+    currency : char(3)
+    expires_at : timestamptz
+    finished_at : timestamptz
+    failure_reason : varchar
+    created_at : timestamptz
+    updated_at : timestamptz
+  }
+
+  entity "provider_callbacks" as provider_callbacks {
+    * callback_id : uuid
+    --
+    payment_id : uuid
+    provider_txn_id : varchar
+    provider_event_id : varchar
+    dedupe_key : varchar
+    provider_status : varchar
+    payload_json : jsonb
+    received_at : timestamptz
+  }
+
+  entity "payment_outbox" as payment_outbox {
+    * event_id : uuid
+    --
+    aggregate_type : varchar
+    aggregate_id : uuid
+    event_type : varchar
+    payload_json : jsonb
+    status : enum(NEW, SENT, FAILED)
+    created_at : timestamptz
+    published_at : timestamptz
+  }
+}
+
+package "Query DB" {
+  entity "payment_view" as payment_view {
+    * payment_id : uuid
+    --
+    user_id : varchar
+    wallet_id : uuid
+    merchant_id : varchar
+    merchant_order_id : varchar
+    amount_value : bigint
+    currency : char(3)
+    status : varchar
+    provider_status : varchar
+    provider_txn_id : varchar
+    created_at : timestamptz
+    finished_at : timestamptz
+    updated_at : timestamptz
+  }
+
+  entity "query_processed_events" as query_processed_events {
+    * event_id : uuid
+    --
+    event_type : varchar
+    payment_id : uuid
+    processed_at : timestamptz
+  }
+}
+
+wallets ||--o{ wallet_transactions : wallet_id
+payments ||--o{ provider_callbacks : payment_id
+
+wallet_transactions .. payments : logical link by payment_id
+wallet_transactions .. payment_view : projection by payment_id
+payments .. payment_view : projection by payment_id
+wallet_outbox .. wallet_transactions : aggregate_id=payment_id
+payment_outbox .. payments : aggregate_id=payment_id
+query_processed_events .. payment_view : dedupe updates
+
+note right of wallet_transactions
+One mutable row per payment.
+UNIQUE(payment_id)
+UNIQUE(request_id)
+end note
+
+note right of provider_callbacks
+UNIQUE(callback_id)
+UNIQUE(dedupe_key)
+end note
+
+note right of wallet_outbox
+Outbox row is inserted
+in the same transaction as
+wallet reserve / finalize.
+end note
+
+note right of payment_outbox
+Outbox row is inserted
+in the same transaction as
+status change in payments.
+end note
+
+@enduml

@@ -1,46 +1,30 @@
 @startuml
-skinparam componentStyle rectangle
-left to right direction
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+LAYOUT_LEFT_RIGHT()
 
-title Payment Platform Context Map
+title Payment Processing Context Map
 
-rectangle "Customer Context\n(клиент, договоры, KYC)" as CUST
-rectangle "Wallet Context\n(кошельки, баланс,\nблокировки/holds)" as WLT
-rectangle "Payments Context\n(жизненный цикл платежа)" as PAY
-rectangle "Anti-Fraud / Scoring Context\n(решение риска: ALLOW/CHALLENGE/DENY)" as FRD
-rectangle "Notifications Context\n(SMS/push/email)" as NTF
-rectangle "Callbacks Context\n(уведомления мерчантам,\nгарантированная доставка)" as CB
-rectangle "Merchant Context\n(мерчант, договор,\nendpoint, ключи)" as MER
-rectangle "Provider Integration Context\n(карточный процессинг,\nСБП, др.)" as PRV
-rectangle "Core Banking Context (Legacy)\n(бухгалтерия/GL)" as CORE
-rectangle "ACL: Core Integration\n(translation, shielding,\nidempotency, mapping)" as ACL
+System_Boundary(bank, "Bank Bounded Contexts") {
+  System(api, "API / Orchestration Context", "Внешний API, start saga, read requests")
+  System(wallet, "Wallet Context", "Баланс, резерв, списание, компенсация")
+  System(txn, "Transaction Context", "Внешний статус платежа, provider integration, timeout")
+  System(callbacks, "Callback Context", "Приём provider callback, валидация, нормализация")
+  System(query, "Query Context", "CQRS read-model: status, history")
+}
 
-CUST --> PAY : Customer/Supplier\nPL: Customer, KYC, ContractRef
-CUST --> WLT : Customer/Supplier\nPL: ContractOpened
-CUST --> FRD : Customer/Supplier\nPL: KycStatusChanged
+System_Ext(provider, "External Provider", "Внешняя система, не bounded context банка")
 
-PAY --> FRD : Customer/Supplier\nsync: AssessRisk
-FRD --> PAY : Published Language\nRiskDecision
+Rel(api, wallet, "Customer/Supplier: reserveFunds", "sync command")
+Rel(api, query, "Customer/Supplier: read API", "sync query")
 
-PAY --> WLT : Customer/Supplier\ncommands: PlaceHold/Commit/Release
-WLT --> PAY : Published Language\nevents: HoldPlaced, WalletDebited
+Rel(wallet, txn, "Published Language: PaymentInitiated", "Kafka")
+Rel(wallet, query, "Published Language: PaymentInitiated", "Kafka")
 
-PAY --> PRV : Customer/Supplier\nPL: ProviderCommand
-PRV --> PAY : Published Language\nProviderStatusChanged
+Rel(txn, wallet, "Published Language: PaymentCompleted / PaymentFailed", "Kafka")
+Rel(txn, query, "Published Language: PaymentCompleted / PaymentFailed", "Kafka")
 
-PAY --> CB : Published Language\nPaymentStatusChanged
-CB --> MER : Customer/Supplier\ncallback delivery
-MER --> CB : Customer/Supplier\nconfig, keys, endpoints
-
-PAY --> NTF : Published Language\nPaymentStatusChanged
-FRD --> NTF : Published Language\nChallengeRequired, FraudDenied
-
-PAY --> ACL : Customer/Supplier\nAccountingIntent
-ACL --> CORE : Conformist\nlegacy API / protocol
-CORE --> ACL : Conformist\nlegacy response
-ACL --> PAY : Anti-Corruption Layer\ntranslated result
-
-PAY --> FRD : Published Language\nevents: PaymentCreated, PaymentReserved
-WLT --> FRD : Published Language\nevents: BalanceChanged, HoldAnomalyDetected
+Rel(txn, provider, "Customer/Supplier: initiate payment", "sync HTTPS")
+Rel(provider, callbacks, "Provider callback contract", "HTTPS callback")
+Rel(callbacks, txn, "Anti-Corruption Layer: normalized provider result", "sync REST")
 
 @enduml
