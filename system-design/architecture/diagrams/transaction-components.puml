@@ -1,0 +1,49 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+LAYOUT_LEFT_RIGHT()
+
+title Transaction Service - C4 Component
+
+Container_Ext(kafka, "Kafka", "Message Broker", "Передаёт PaymentInitiated и terminal events")
+System_Ext(provider, "External Provider", "Исполняет внешний платёж")
+Container_Ext(callbackServiceExt, "Callback Service", "REST", "Передаёт нормализованный provider result")
+
+Container_Boundary(transactionBoundary, "Transaction Service") {
+  Component(initiatedConsumer, "PaymentInitiated Consumer", "Kafka consumer", "Принимает PaymentInitiated")
+  Component(initiateHandler, "Initiate Payment Handler", "Application Service", "Создаёт PROVIDER_PENDING и запускает provider flow")
+  Component(providerClient, "Provider Client", "HTTP client", "Вызывает провайдера и передаёт paymentId как reference")
+  Component(callbackApi, "Callback Result API", "REST endpoint", "Принимает POST /internal/provider-results")
+  Component(providerResultHandler, "Provider Result Handler", "Application Service", "Финализирует внешний статус по callback или timeout")
+  Component(timeoutMonitor, "Timeout Monitor", "Scheduled job", "Ищет просроченные PROVIDER_PENDING платежи")
+  Component(txIdempotency, "Idempotency Guard", "Application Service", "Проверяет paymentId, dedupeKey и terminal state")
+  Component(paymentRepo, "Payment Repository", "Repository", "Работает с payments")
+  Component(callbackRepo, "Provider Callback Repository", "Repository", "Работает с provider_callbacks")
+  Component(outboxWriter, "Outbox Writer", "Application Service", "Записывает PaymentCompleted и PaymentFailed в payment_outbox")
+  Component(outboxPublisher, "Outbox Publisher", "Polling publisher", "Читает payment_outbox и публикует terminal events")
+  ContainerDb(transactionDb, "Transaction DB", "PostgreSQL", "payments, provider_callbacks, payment_outbox")
+}
+
+Rel(kafka, initiatedConsumer, "PaymentInitiated", "async")
+Rel(initiatedConsumer, initiateHandler, "start provider flow")
+Rel(initiateHandler, txIdempotency, "check paymentId")
+Rel(initiateHandler, paymentRepo, "create PROVIDER_PENDING")
+Rel(initiateHandler, providerClient, "send payment request with paymentId reference")
+Rel(providerClient, provider, "initiate payment", "HTTPS")
+
+Rel(callbackServiceExt, callbackApi, "POST /internal/provider-results", "REST")
+Rel(callbackApi, providerResultHandler, "provider result")
+Rel(timeoutMonitor, providerResultHandler, "expired pending payment")
+
+Rel(providerResultHandler, txIdempotency, "check dedupeKey / terminal state")
+Rel(providerResultHandler, callbackRepo, "store callback record and dedupeKey")
+Rel(providerResultHandler, paymentRepo, "mark COMPLETED / FAILED / TIMEOUT")
+Rel(providerResultHandler, outboxWriter, "write PaymentCompleted / PaymentFailed")
+
+Rel(txIdempotency, transactionDb, "reads")
+Rel(paymentRepo, transactionDb, "reads/writes")
+Rel(callbackRepo, transactionDb, "reads/writes")
+Rel(outboxWriter, transactionDb, "writes")
+Rel(outboxPublisher, transactionDb, "poll payment_outbox")
+Rel(outboxPublisher, kafka, "publish terminal events", "async")
+
+@enduml

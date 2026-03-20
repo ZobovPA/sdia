@@ -1,0 +1,49 @@
+@startuml
+title Payment Saga - Failure or Timeout Flow
+autonumber
+skinparam shadowing false
+
+actor Client as client
+participant "API Gateway" as gateway
+participant "Orchestrator / API" as orchestrator
+participant "Wallet Service" as wallet
+database "Wallet DB" as walletDb
+participant "Wallet Outbox Publisher" as walletPublisher
+queue "Kafka" as kafka
+participant "Transaction Service" as transaction
+database "Transaction DB" as transactionDb
+participant "Transaction Outbox Publisher" as transactionPublisher
+participant "Timeout Monitor" as timeoutMonitor
+participant "Payment Query Service" as query
+database "Query DB" as queryDb
+
+client -> gateway : POST /api/payments
+gateway -> orchestrator : create payment
+orchestrator -> wallet : reserveFunds(requestId,\namount, recipient, merchantInfo)
+wallet -> walletDb : tx: find by requestId or\nreserve funds + insert wallet_transactions +\ninsert wallet_outbox(PaymentInitiated with providerId,\nrecipientAccount, merchantOrderId)
+walletDb --> wallet : commit
+orchestrator --> client : 202 Accepted + paymentId
+
+walletPublisher -> walletDb : poll wallet_outbox
+walletPublisher -> kafka : PaymentInitiated
+
+kafka -> transaction : PaymentInitiated(providerId,\nrecipientAccount, merchantOrderId)
+transaction -> transactionDb : create payment PROVIDER_PENDING\nwith expires_at and recipient data
+transaction -> provider : initiate payment\n(recipientAccount,\npaymentId as merchantReference)
+
+timeoutMonitor -> transaction : find expired pending payments
+transaction -> transactionDb : tx: mark TIMEOUT +\ninsert payment_outbox(PaymentFailed)
+transactionDb --> transaction : commit
+transactionPublisher -> transactionDb : poll payment_outbox
+transactionPublisher -> kafka : PaymentFailed(providerStatus=TIMEOUT)
+
+kafka -> wallet : PaymentFailed
+wallet -> walletDb : tx: release reserve\nmark CANCELLED
+
+kafka -> query : PaymentInitiated
+query -> queryDb : upsert payment_view(status=RESERVED)
+
+kafka -> query : PaymentFailed
+query -> queryDb : update payment_view(status=FAILED,\nproviderStatus=TIMEOUT)
+
+@enduml

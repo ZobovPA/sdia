@@ -18,7 +18,7 @@ System_Ext(merchants, "Мерчанты и партнёры", "Получают 
 System_Ext(notificationProviders, "SMS/Push/Email провайдеры", "Внешние каналы доставки уведомлений")
 
 Rel(customer, channels, "Инициирует платежи и смотрит статусы", "HTTPS")
-Rel(channels, paymentPlatform, "Создание платежей, подтверждение, история, статусы", "HTTPS")
+Rel(channels, paymentPlatform, "Создание платежа, история, текущий статус", "HTTPS")
 
 Rel(paymentPlatform, cardProcessing, "Проведение операций и получение статусов", "API + webhooks")
 Rel(paymentPlatform, sbp, "Платежи и получение статусов", "API + webhooks")
