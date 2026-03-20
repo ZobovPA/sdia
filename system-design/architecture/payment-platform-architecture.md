@@ -317,7 +317,7 @@ Kafka хорошо решает задачу журнала событий, но
 
 - локальные транзакции и outbox лучше сочетаются с событийной моделью
 - `Wallet Service` и `Transaction Service` остаются слабо связаны
-- `Orchestrator` не хранит состояние распределённой транзакции и не становится точкой отказа
+- `Orchestrator` не хранит состояние распределённой транзакции и не становится точкой отказа; идемпотентный mapping `requestId -> paymentId` живёт в `Wallet Service`
 - read-модель естественно обновляется теми же событиями, что двигают сагу
 
 ## Write-модели и read-модель
@@ -327,13 +327,13 @@ Kafka хорошо решает задачу журнала событий, но
 `Wallet Service` хранит:
 
 - `wallets` - состояние баланса
-- `wallet_transactions` - одна mutable-запись по каждому `paymentId`, отражающая жизненный цикл денежной операции в кошельке
+- `wallet_transactions` - одна mutable-запись по каждому `paymentId`, отражающая жизненный цикл денежной операции в кошельке и mapping внешнего `requestId` на внутренний `paymentId`
 - `wallet_outbox` - событие `PaymentInitiated`
 
 Локальная транзакция:
 
 1. проверить доступный баланс
-2. создать запись `wallet_transactions` со статусом `RESERVED`
+2. по `requestId` найти существующую запись или при первом вызове создать новую запись `wallet_transactions` со статусом `RESERVED`
 3. уменьшить `available_amount`, увеличить `reserved_amount`
 4. вставить `PaymentInitiated` в `wallet_outbox`
 
@@ -345,6 +345,8 @@ Kafka хорошо решает задачу журнала событий, но
 `wallet_transactions` в этой схеме не является append-only журналом отдельных резервов и финализаций. Это одна write-запись платежа внутри `Wallet Service`, которая меняет статус от `RESERVED` к терминальному состоянию.
 
 Важно: статус `wallet_transactions` не равен публичному статусу платежа в read-модели. `Wallet Service` фиксирует внутреннее бухгалтерское состояние денег (`RESERVED`, `COMPLETED`, `CANCELLED`), тогда как внешний жизненный цикл платежа (`COMPLETED`, `FAILED`, `TIMEOUT`) принадлежит `Transaction Service`.
+
+Именно `Wallet Service` хранит идемпотентный mapping `requestId -> paymentId`. Поэтому `Orchestrator` может оставаться stateless: при каждом `POST /api/payments` он передаёт `requestId` и бизнес-payload в `Wallet Service`, а тот либо создаёт новый платёж, либо возвращает уже существующий `paymentId`.
 
 ### Transaction Service
 
@@ -428,14 +430,17 @@ Read-модель обновляется только событиями:
 
 - `wallet_transactions.payment_id` уникален для денежной операции
 - `wallet_transactions.request_id` уникален для внешней команды пользователя
+- `wallet_transactions.request_fingerprint` хранит отпечаток нормализованного payload для проверки, что повторный `requestId` пришёл с теми же параметрами
 - обработка терминального события проверяет, не находится ли транзакция уже в терминальном состоянии
 
 Источник истины для идемпотентности: `Postgres`, без отдельного `Redis`.
 
-Повторная команда `reserveFunds` с тем же `paymentId` или `requestId`:
+Повторная команда `reserveFunds` с тем же `requestId`:
 
-- не создаёт второй резерв
-- возвращает уже вычисленный результат или `409/200` в зависимости от контракта
+- с тем же нормализованным payload не создаёт второй резерв и возвращает тот же `paymentId`
+- с другим payload отклоняется как `409 Conflict`
+
+Именно здесь замыкается идемпотентность внешнего `POST /api/payments`: `Orchestrator` не держит собственное состояние, а полагается на `Wallet Service`, который физически хранит mapping `requestId -> paymentId` и возвращает уже созданный платёж при retry.
 
 ### Transaction Service
 
@@ -464,7 +469,7 @@ Read-модель обновляется только событиями:
 - доступный баланс восстанавливается
 - статус записи в `wallet_transactions` переводится в `CANCELLED`
 
-Если поздний callback от провайдера приходит после таймаута, `Transaction Service` считает его дубликатом или конфликтующим поздним сигналом, сохраняет для аудита, но не переоткрывает завершённую сагу автоматически.
+Если поздний callback от провайдера приходит после таймаута, `Transaction Service` считает его дубликатом или конфликтующим поздним сигналом, сохраняет для аудита, не переоткрывает завершённую сагу автоматически и передаёт случай в manual reconcile / backoffice-разбор.
 
 ## Callback Service
 
@@ -506,7 +511,7 @@ Write-команды идут в write-сервисы:
 ### Успешный сценарий
 
 1. Клиент вызывает `POST /api/payments`.
-2. `Orchestrator` создаёт `paymentId` и вызывает `Wallet Service: reserveFunds`.
+2. `Orchestrator` передаёт `requestId` и payload в `Wallet Service: reserveFunds`.
 3. `Wallet Service` резервирует деньги и публикует `PaymentInitiated`.
 4. `Transaction Service` получает событие, создаёт технический платёж и отправляет запрос провайдеру.
 5. Провайдер шлёт callback в `Callback Service`.

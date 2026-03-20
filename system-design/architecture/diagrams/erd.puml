@@ -21,8 +21,9 @@ package "Wallet DB" {
     * transaction_id : uuid
     --
     wallet_id : uuid
-    payment_id : uuid
-    request_id : uuid
+    payment_id : uuid <<UNIQUE>>
+    request_id : uuid <<UNIQUE>>
+    request_fingerprint : varchar
     status : enum(RESERVED, COMPLETED, CANCELLED)
     final_action : enum(COMMIT, RELEASE)
     amount_value : bigint
@@ -70,12 +71,12 @@ package "Transaction DB" {
   }
 
   entity "provider_callbacks" as provider_callbacks {
-    * callback_id : uuid
+    * callback_id : uuid <<UNIQUE>>
     --
     payment_id : uuid
     provider_txn_id : varchar
     provider_event_id : varchar
-    dedupe_key : varchar
+    dedupe_key : varchar <<UNIQUE>>
     provider_status : varchar
     payload_json : jsonb
     received_at : timestamptz
@@ -133,13 +134,13 @@ query_processed_events .. payment_view : dedupe updates
 
 note right of wallet_transactions
 One mutable row per payment.
-UNIQUE(payment_id)
-UNIQUE(request_id)
+request_fingerprint is compared
+when the same request_id arrives again.
 end note
 
 note right of provider_callbacks
-UNIQUE(callback_id)
-UNIQUE(dedupe_key)
+dedupe_key is a schema constraint,
+not only a runtime convention.
 end note
 
 note right of wallet_outbox

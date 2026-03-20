@@ -19,8 +19,8 @@ database "Query DB" as queryDb
 
 client -> gateway : POST /api/payments
 gateway -> orchestrator : create payment
-orchestrator -> wallet : reserveFunds(paymentId, requestId,\namount, recipient, merchantInfo)
-wallet -> walletDb : tx: reserve funds +\ninsert wallet_outbox(PaymentInitiated with providerId,\nrecipientAccount, merchantOrderId)
+orchestrator -> wallet : reserveFunds(requestId,\namount, recipient, merchantInfo)
+wallet -> walletDb : tx: find by requestId or\nreserve funds + insert wallet_transactions +\ninsert wallet_outbox(PaymentInitiated with providerId,\nrecipientAccount, merchantOrderId)
 walletDb --> wallet : commit
 orchestrator --> client : 202 Accepted + paymentId
 

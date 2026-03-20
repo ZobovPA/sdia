@@ -9,10 +9,10 @@ Container_Ext(kafka, "Kafka", "Message Broker", "Передаёт terminal event
 
 Container_Boundary(walletBoundary, "Wallet Service") {
   Component(reserveApi, "ReserveFunds API", "REST endpoint", "Принимает команду reserveFunds")
-  Component(reserveHandler, "Reserve Command Handler", "Application Service", "Проверяет баланс и создаёт RESERVED запись")
+  Component(reserveHandler, "Reserve Command Handler", "Application Service", "Проверяет баланс и по requestId создаёт или возвращает payment")
   Component(terminalConsumer, "Terminal Event Consumer", "Kafka consumer", "Обрабатывает PaymentCompleted и PaymentFailed")
   Component(finalizeHandler, "Finalize Command Handler", "Application Service", "Исполняет commitFunds и releaseFunds")
-  Component(walletIdempotency, "Idempotency Guard", "Application Service", "Проверяет paymentId, requestId и terminal state")
+  Component(walletIdempotency, "Idempotency Guard", "Application Service", "Проверяет requestId, request fingerprint и terminal state")
   Component(walletRepo, "Wallet Repository", "Repository", "Читает и обновляет wallets")
   Component(txRepo, "Wallet Transaction Repository", "Repository", "Работает с wallet_transactions")
   Component(outboxWriter, "Outbox Writer", "Application Service", "Записывает PaymentInitiated в wallet_outbox")
@@ -22,7 +22,7 @@ Container_Boundary(walletBoundary, "Wallet Service") {
 
 Rel(orchestrator, reserveApi, "reserveFunds", "REST")
 Rel(reserveApi, reserveHandler, "reserveFunds")
-Rel(reserveHandler, walletIdempotency, "check paymentId / requestId")
+Rel(reserveHandler, walletIdempotency, "check requestId / request fingerprint")
 Rel(reserveHandler, walletRepo, "lock wallet")
 Rel(reserveHandler, txRepo, "create RESERVED payment row")
 Rel(reserveHandler, outboxWriter, "write PaymentInitiated")

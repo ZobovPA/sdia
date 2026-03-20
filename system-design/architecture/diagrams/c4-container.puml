@@ -12,13 +12,15 @@ System_Boundary(paymentPlatform, "Payment Processing Platform") {
   Container(orchestrator, "Orchestrator / API", "REST", "Стартует платёжную сагу и читает статус из query-модели")
 
   Container_Boundary(walletBoundary, "Wallet Service") {
-    Container(walletService, "Wallet Service", "REST + Kafka", "Проверка баланса, резерв, списание, компенсация")
+    Container(walletService, "Wallet Service", "REST + Kafka consumer", "Проверка баланса, резерв, списание, компенсация")
     ContainerDb(walletDb, "Wallet DB", "PostgreSQL", "wallets, wallet_transactions, wallet_outbox")
+    Container(walletOutboxPublisher, "Wallet Outbox Publisher", "Polling publisher", "Читает wallet_outbox и публикует PaymentInitiated")
   }
 
   Container_Boundary(transactionBoundary, "Transaction Service") {
-    Container(transactionService, "Transaction Service", "REST + Kafka", "Технический статус платежа, интеграция с провайдером, timeout")
+    Container(transactionService, "Transaction Service", "REST + Kafka consumer", "Технический статус платежа, интеграция с провайдером, timeout")
     ContainerDb(transactionDb, "Transaction DB", "PostgreSQL", "payments, provider_callbacks, payment_outbox")
+    Container(transactionOutboxPublisher, "Transaction Outbox Publisher", "Polling publisher", "Читает payment_outbox и публикует terminal events")
   }
 
   Container_Boundary(callbackBoundary, "Callback Service") {
@@ -43,7 +45,8 @@ Rel(orchestrator, walletService, "reserveFunds", "REST")
 Rel(orchestrator, queryService, "GetPaymentStatus / GetUserPayments", "REST")
 
 Rel(walletService, walletDb, "Чтение/запись")
-Rel(walletService, kafka, "PaymentInitiated", "async")
+Rel(walletOutboxPublisher, walletDb, "poll wallet_outbox")
+Rel(walletOutboxPublisher, kafka, "PaymentInitiated", "async")
 
 Rel(kafka, transactionService, "PaymentInitiated", "async")
 Rel(kafka, walletService, "PaymentCompleted / PaymentFailed", "async")
@@ -52,7 +55,8 @@ Rel(kafka, queryService, "PaymentInitiated / PaymentCompleted / PaymentFailed", 
 Rel(transactionService, transactionDb, "Чтение/запись")
 Rel(transactionService, provider, "Initiate payment", "HTTPS")
 Rel(callbackService, transactionService, "POST /internal/provider-results", "REST")
-Rel(transactionService, kafka, "PaymentCompleted / PaymentFailed", "async")
+Rel(transactionOutboxPublisher, transactionDb, "poll payment_outbox")
+Rel(transactionOutboxPublisher, kafka, "PaymentCompleted / PaymentFailed", "async")
 
 Rel(queryService, queryDb, "Чтение/запись")
 
