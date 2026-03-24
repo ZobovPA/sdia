@@ -1,0 +1,32 @@
+@startuml
+title Provider Callback Flow
+autonumber
+skinparam shadowing false
+
+participant "External Provider" as provider
+participant "API Gateway" as gateway
+participant "Callback Service" as callback
+participant "Transaction Service" as transaction
+database "Transaction DB" as transactionDb
+participant "Transaction Outbox Publisher" as transactionPublisher
+queue "Kafka" as kafka
+participant "Wallet Service" as wallet
+participant "Payment Query Service" as query
+
+provider -> gateway : HTTPS callback(merchantReference,\npaymentId, providerTxnId,\nproviderEventId, status, signature)
+gateway -> callback : POST /api/provider/callbacks/{providerCode}
+callback -> callback : validate signature /\nextract paymentId from reference /\nnormalize payload
+callback -> transaction : POST /internal/provider-results\n(callbackId, providerEventId,\ndedupeKey)
+
+transaction -> transactionDb : tx: store provider callback by dedupeKey +\nupdate payment status +\ninsert payment_outbox
+transactionDb --> transaction : commit
+transaction --> callback : 200 accepted
+callback --> gateway : 200 accepted
+gateway --> provider : 200 OK
+
+transactionPublisher -> transactionDb : poll payment_outbox
+transactionPublisher -> kafka : PaymentCompleted /\nPaymentFailed
+kafka -> wallet : terminal event
+kafka -> query : terminal event
+
+@enduml

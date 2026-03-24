@@ -1,0 +1,57 @@
+@startuml
+title Payment Saga - Success Flow
+autonumber
+skinparam shadowing false
+
+actor Client as client
+participant "API Gateway" as gateway
+participant "Orchestrator / API" as orchestrator
+participant "Wallet Service" as wallet
+database "Wallet DB" as walletDb
+participant "Wallet Outbox Publisher" as walletPublisher
+queue "Kafka" as kafka
+participant "Transaction Service" as transaction
+database "Transaction DB" as transactionDb
+participant "Transaction Outbox Publisher" as transactionPublisher
+participant "External Provider" as provider
+participant "Callback Service" as callback
+participant "Payment Query Service" as query
+database "Query DB" as queryDb
+
+client -> gateway : POST /api/payments
+gateway -> orchestrator : create payment
+orchestrator -> wallet : reserveFunds(requestId,\namount, recipient, merchantInfo)
+wallet -> walletDb : tx: find by requestId or\nreserve funds + insert wallet_transactions +\ninsert wallet_outbox(PaymentInitiated with providerId,\nrecipientAccount, merchantOrderId)
+walletDb --> wallet : commit
+wallet --> orchestrator : paymentId + status RESERVED
+orchestrator --> gateway : 202 Accepted + paymentId
+gateway --> client : response
+
+walletPublisher -> walletDb : poll wallet_outbox
+walletPublisher -> kafka : PaymentInitiated
+
+kafka -> transaction : PaymentInitiated(providerId,\nrecipientAccount, merchantOrderId)
+transaction -> transactionDb : create payment PROVIDER_PENDING\nstore provider route, recipient,\nmerchant metadata
+transaction -> provider : initiate payment\n(recipientAccount,\npaymentId as merchantReference)
+provider --> transaction : ack providerTxnId
+
+kafka -> query : PaymentInitiated
+query -> queryDb : upsert payment_view(status=RESERVED)
+
+provider -> gateway : callback SUCCESS\n(paymentId / merchantReference,\nproviderTxnId, signature)
+gateway -> callback : provider callback
+callback -> callback : validate signature /\nextract paymentId from reference /\nnormalize payload
+callback -> transaction : POST /internal/provider-results\n(callbackId, providerEventId,\ndedupeKey)
+transaction -> transactionDb : tx: store provider callback +\nmark COMPLETED +\ninsert payment_outbox(PaymentCompleted)
+transactionDb --> transaction : commit
+
+transactionPublisher -> transactionDb : poll payment_outbox
+transactionPublisher -> kafka : PaymentCompleted
+
+kafka -> wallet : PaymentCompleted
+wallet -> walletDb : tx: commit reserve\nmark COMPLETED
+
+kafka -> query : PaymentCompleted
+query -> queryDb : update payment_view(status=COMPLETED)
+
+@enduml

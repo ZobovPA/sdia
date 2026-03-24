@@ -1,0 +1,30 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+LAYOUT_LEFT_RIGHT()
+
+title Payment Query Service - C4 Component
+
+Container_Ext(orchestrator, "Orchestrator / API", "REST", "Читает историю и статус платежей")
+Container_Ext(kafka, "Kafka", "Message Broker", "Передаёт PaymentInitiated, PaymentCompleted, PaymentFailed")
+
+Container_Boundary(queryBoundary, "Payment Query Service") {
+  Component(eventConsumer, "Projection Event Consumer", "Kafka consumer", "Получает доменные события платежей")
+  Component(projectionBuilder, "Projection Builder", "Application Service", "Нормализует событие и обновляет projection")
+  Component(queryApi, "Query API", "REST endpoint", "Возвращает статус платежа и историю пользователя")
+  Component(processedEventsRepo, "Processed Events Repository", "Repository", "Проверяет dedupe по eventId")
+  Component(paymentViewRepo, "Payment View Repository", "Repository", "Работает с payment_view")
+  ContainerDb(queryDb, "Query DB", "PostgreSQL", "payment_view, query_processed_events")
+}
+
+Rel(kafka, eventConsumer, "PaymentInitiated / PaymentCompleted / PaymentFailed", "async")
+Rel(eventConsumer, projectionBuilder, "normalized event")
+Rel(projectionBuilder, processedEventsRepo, "dedupe by eventId")
+Rel(projectionBuilder, paymentViewRepo, "upsert payment view")
+
+Rel(orchestrator, queryApi, "get payment by id / list by user", "REST")
+Rel(queryApi, paymentViewRepo, "read projections")
+
+Rel(processedEventsRepo, queryDb, "reads/writes")
+Rel(paymentViewRepo, queryDb, "reads/writes")
+
+@enduml
