@@ -13,6 +13,10 @@
 - `diagrams/sequence-success.puml` - успешный сценарий
 - `diagrams/sequence-failure-timeout.puml` - сценарий ошибки и компенсации
 - `diagrams/sequence-callback-flow.puml` - поток callback-а провайдера
+- `diagrams/sequence-provider-resilience.puml` - таймауты, ретраи, circuit breaker и fallback при сбое провайдера
+- `diagrams/sequence-dlq-reprocessing.puml` - повторные ошибки consumer-а и перевод сообщения в DLQ
+- `diagrams/sequence-cache-read.puml` - чтение статуса и истории через cache hit/miss
+- `diagrams/sequence-observability-flow.puml` - прохождение trace-id, метрик и логов по платёжному потоку
 - `diagrams/erd.puml` - схема write/read моделей и outbox-таблиц
 
 ## Архитектурный контекст
@@ -118,7 +122,7 @@
 - `Wallet DB`
 - `Analytics Storage`
 
-В текущем комплекте диаграмм [`c4-container.puml`](./diagrams/c4-container.puml) детализирует упрощённый сценарий внешнего платежа: `API Gateway`, `Orchestrator / API`, `Wallet Service`, `Transaction Service`, `Callback Service`, `Payment Query Service`, `Kafka` и соответствующие БД. Остальные контексты верхнего уровня остаются на уровне доменной декомпозиции и системного контекста.
+В текущем комплекте диаграмм [`c4-container.puml`](./diagrams/c4-container.puml) детализирует упрощённый сценарий внешнего платежа: `API Gateway`, `Orchestrator / API`, `Wallet Service`, `Transaction Service`, `Callback Service`, `Payment Query Service`, `Notifications Service`, `Kafka`, `RabbitMQ`, `Redis` и стек наблюдаемости. Остальные контексты верхнего уровня остаются на уровне доменной декомпозиции и системного контекста.
 
 Принципы декомпозиции на контейнеры:
 
@@ -224,7 +228,7 @@
 
 Kafka хорошо решает задачу журнала событий, но хуже подходит как рабочая очередь для операционной доставки с TTL, задержками, ручными повторами и ограничением скорости по потребителям. Поэтому `Callbacks` и batch-процессы выносятся в `RabbitMQ`, а доменная история остаётся в `Kafka`.
 
-В текущем упрощённом детальном сценарии этого документа роль брокера реализована только через `Kafka`: этого достаточно, чтобы показать `Saga`, `Transactional Outbox`, `CQRS` и обработку callback-ов без дополнительного операционного контура.
+В упрощённом детальном сценарии одного `Kafka` достаточно, чтобы показать `Saga`, `Transactional Outbox`, `CQRS` и обработку callback-ов. Для фоновых задач, retry и DLQ поверх этого добавлен `RabbitMQ`, а `Kafka` остаётся доменной шиной и журналом событий.
 
 ## Внешний контур и API Gateway
 
@@ -293,8 +297,9 @@ Kafka хорошо решает задачу журнала событий, но
 | `Wallet Service` | проверка баланса, резерв, списание, компенсация | `Wallet DB` | владелец денежного состояния |
 | `Transaction Service` | техническое состояние платежа, интеграция с провайдером, таймауты | `Transaction DB` | владелец статуса внешней транзакции |
 | `Callback Service` | приём callback-ов провайдера, проверка подписи, адаптация внешнего контракта | без собственной write-модели платежа | изолирует внешний callback-интерфейс |
-| `Payment Query Service` | денормализованные проекции для чтения | `Query DB` | CQRS read-модель |
-| `Broker` | доставка доменных событий | Kafka | асинхронный канал между write/read частями |
+| `Payment Query Service` | денормализованные проекции для чтения и cache invalidation | `Query DB` + `Redis` | CQRS read-модель |
+| `Notifications Service` | отправка SMS / push / email, retry и DLQ для внешних notification providers | operational queues | побочный асинхронный контур |
+| `Messaging` | доставка доменных событий, retry jobs и DLQ | `Kafka` + `RabbitMQ` | асинхронный канал между write/read частями и operational processing |
 | `External Provider` | внешний исполнитель платежа | внешняя система | возвращает финальный результат |
 
 Ключевое правило: `Wallet Service` владеет деньгами, `Transaction Service` владеет техническим статусом внешнего платежа, а `Payment Query Service` владеет только read-проекцией. `Callback Service` не меняет бизнес-состояние кошелька и не становится источником истины.
@@ -390,7 +395,7 @@ Read-модель обновляется только событиями:
 
 `Payment Query Service` проецирует внешний статус платежа из домена `Transaction Service`. Поэтому после компенсации в `Wallet Service` локальная запись может иметь статус `CANCELLED`, а пользовательская read-модель при этом показывает `FAILED` с причиной ошибки провайдера. Это не конфликт, а отражение разных моделей ответственности.
 
-Для read-модели выбран `Postgres`, потому что запросы учебного кейса операционные и предсказуемые:
+Для read-модели выбран `Postgres`, потому что запросы в этом контуре операционные и предсказуемые:
 
 - история платежей пользователя
 - статус конкретного платежа
@@ -529,16 +534,137 @@ Write-команды идут в write-сервисы:
 5. `Wallet Service` выполняет компенсацию: снимает резерв и возвращает деньги.
 6. `Payment Query Service` обновляет статус в read-модели.
 
+## Надёжность, масштабирование и наблюдаемость поверх Saga / Outbox / CQRS
+
+Этот слой не меняет доменную модель платёжного процесса. Поверх уже существующей связки `Saga + Transactional Outbox + CQRS` добавляется эксплуатационная часть: таймауты, ретраи, circuit breaker, bulkhead, rate limiting, fallback, DLQ, cache и наблюдаемость. Денежный инвариант остаётся прежним: только `Wallet Service` меняет деньги, только `Transaction Service` принимает решение по внешнему результату платежа, а все побочные процессы управляются отдельно.
+
+## Resilience-политики
+
+### Политики по взаимодействиям
+
+| Взаимодействие | Таймаут | Retries | Circuit Breaker | Bulkhead | Rate Limit | Fallback | Обоснование |
+|---|---|---|---|---|---|---|---|
+| `Orchestrator -> Wallet Service` (`reserveFunds`) | `500 ms` | `1` безопасный retry только на network timeout, потому что есть `requestId` | нет отдельного CB, fail-fast на уровне HTTP client | отдельный пул исходящих соединений к `Wallet` | внешний лимит ставится на `Gateway` | нет, если `Wallet` недоступен, create payment завершается ошибкой | денежный шаг должен быть быстрым и определённым |
+| `Orchestrator -> Payment Query Service` | `200 ms` | `1` retry с jitter | да, короткий CB на чтениях | отдельный read-pool | лимиты на `Gateway` по пользователю и клиентскому приложению | возврат краткоживущего stale cache из `Redis`, если read DB временно недоступна | чтение должно деградировать мягко и не влиять на деньги |
+| `Wallet Service -> Kafka` через outbox publisher | poll interval `200-500 ms` | retry публикации до `N` попыток с backoff | нет отдельного CB, но есть остановка publisher-а и алертинг | отдельный worker pool publisher-а | не требуется | запись остаётся в outbox до успешной публикации | outbox уже даёт атомарность, задача publisher-а - надёжно доставить событие |
+| `Transaction Service -> External Provider` | connect `300 ms`, response `2 s` | `2` retry по timeout/`5xx` с exponential backoff и jitter | да, open при высокой доле ошибок или timeout burst; half-open пробует ограниченное число запросов | отдельный HTTP client pool и worker pool на провайдера | локальный limiter по провайдеру + gateway limit на внешний вход | запись остаётся в `PROVIDER_PENDING`, ставится job в `provider.retry`, пользователь видит платёж как processing | внешний провайдер - самый нестабильный участок системы |
+| `Wallet / Payments -> Core Integration / ACL` | `1 s` | только для безопасных read/check запросов; без слепых retry для posting | да | отдельный пул и очередь в ACL | локальные лимиты на legacy | `POSTING_PENDING` и асинхронный догон через очередь | legacy не должен ломать пользовательский путь |
+| `Notifications Service -> SMS/email/push providers` | `1 s` | до `5` попыток с exponential backoff | да, отдельный CB на каждого провайдера | worker pool per provider | лимиты по провайдеру и шаблону рассылки | deferred retry в очереди, затем `notifications.dlq` | уведомления важны, но не должны мешать платежу |
+| `Callback Service -> Transaction Service` | `300 ms` | `2` retry на сетевые ошибки | короткий CB | отдельный internal REST pool | лимит на callback endpoint в gateway | invalid callback уходит в `callbacks.invalid.dlq` | защищаем внутренний write-контур от шторма callback-ов |
+
+### Где именно применяются паттерны
+
+- `Timeouts` ограничивают синхронные зависимости в критическом пути и не дают внешним системам держать ресурсы бесконечно.
+- `Retries` применяются только к сетевым и временным ошибкам; на необратимые бизнес-ошибки повтор не запускается.
+- `Circuit Breaker` стоит на вызовах провайдера, `PaymentQueryService`, `Core Integration / ACL` и внешних notification providers.
+- `Bulkhead` разделяет пулы соединений и worker-ы: отдельно для `Wallet`, отдельно для `Query`, отдельно для каждого платёжного провайдера и notification provider.
+- `Rate Limit` ставится на `Gateway` для клиентского входа и локально в `Transaction Service` / `Notifications Service` для внешних провайдеров.
+- `Fallback` допускается только там, где он не нарушает денежный инвариант: чтения могут вернуть stale cache, а внешний платёж может быть переведён в `PROVIDER_PENDING` с отложенной обработкой. Для reserve/commit/release fallback не используется.
+
+## Очереди, DLQ и backpressure
+
+### Основные потоки и DLQ
+
+| Поток / сценарий | Брокер | Тип | Есть DLQ | Обработка DLQ / комментарий |
+|---|---|---|---|---|
+| `PaymentInitiated -> Transaction Service` | `Kafka` | event | да, `payments.transaction.dlq` | ручной re-drive после разбора payload / бага consumer-а |
+| `PaymentCompleted / PaymentFailed -> Wallet Service` | `Kafka` | event | да, `payments.wallet.dlq` | после `N` неуспешных попыток событие уходит в DLQ, создаётся алерт и задача на re-drive |
+| `PaymentInitiated / PaymentCompleted / PaymentFailed -> Query Service` | `Kafka` | event | да, `payments.query.dlq` | повторная проекция или ручной replay из журнала |
+| `Provider retry job` | `RabbitMQ` | job | да, `provider.retry.dlq` | ручной разбор, если провайдер долго недоступен или payload неконсистентен |
+| `Notification dispatch` | `RabbitMQ` | job | да, `notifications.dlq` | повтор, ограничение скорости, ручной re-drive для долгих отказов |
+| `Invalid provider callback` | `RabbitMQ` | command / job | да, `callbacks.invalid.dlq` | payload сохраняется для аудита и ручной проверки подписи / маппинга |
+
+### Backpressure и изоляция потоков
+
+- `Kafka` используется для доменных событий и replay. Конкурентность consumer-ов ограничивается числом partitions и consumer group-ами.
+- `RabbitMQ` используется для операционных очередей: `provider.retry`, `notifications.dispatch`, `*.dlq`.
+- тяжёлые и медленные процессы отделены от доменных событий: retry платёжного провайдера и рассылка уведомлений не блокируют `payments.events`
+- у consumer-ов задаются `max concurrency`, `prefetch` и верхние лимиты на reprocessing batch size
+- DLQ не переигрывается автоматически бесконечно; после заданного числа попыток событие уходит в отдельный контур разбора
+
+### Как работает fallback при проблемах с провайдером
+
+Если провайдер отвечает медленно или серия вызовов начинает завершаться timeout/`5xx`, `Transaction Service` сначала делает ограниченные retry с backoff. Если лимит попыток исчерпан и breaker открывается, сервис не публикует терминальный `PaymentFailed` сразу. Вместо этого он сохраняет локальный статус `PROVIDER_PENDING`, ставит retry job в `RabbitMQ` и переводит обработку в асинхронный режим. Только когда истекает общее окно ожидания и повторные попытки не помогли, срабатывает `Timeout Monitor`, публикуется `PaymentFailed`, а `Wallet Service` снимает резерв.
+
+## Кэширование
+
+### Что кэшируем
+
+- `GET /api/payments/{paymentId}` - быстрый статус конкретного платежа
+- `GET /api/users/{userId}/payments` - история платежей пользователя и первая страница списка
+- справочные данные, которые не участвуют напрямую в денежном инварианте: merchant profile, routing hints, notification templates
+
+### Что не кэшируем грубо
+
+- баланс кошелька и состояние резервов как источник истины
+- результат `reserveFunds`, `commitFunds`, `releaseFunds`
+- terminal state платежа до того, как он зафиксирован в write-модели
+
+### Выбранные стратегии
+
+- для `Payment Query Service` используется `Cache-Aside` через `Redis`: при cache hit ответ возвращается сразу, при miss данные читаются из `Query DB`, после чего результат кладётся в cache с коротким TTL
+- для справочных данных мерчанта и шаблонов уведомлений допустим `Read-Through` или локальный cache с коротким TTL
+- `Write-Through` допускается только для небольших справочных данных, где важно, чтобы cache и store менялись вместе
+- `Write-Behind` для денег и статусов платежа не используется: отложенная запись в хранилище создаёт риск потерять актуальное состояние
+
+Для пользовательских чтений достаточно короткого TTL: `10-15 секунд` для статуса и `30-60 секунд` для истории. Дополнительно при приходе terminal event `Payment Query Service` инвалидирует соответствующий cache key и обновляет значение заново.
+
+## Observability: метрики, логи, трейсы, SLI / SLO
+
+### Стек наблюдаемости
+
+- `Prometheus` - сбор и хранение метрик
+- `Grafana` - дашборды и алерты
+- `Grafana Alloy` - сбор метрик, логов и трейсов с сервисов и хостов
+- `Loki` - централизованные логи
+- `Tempo` - распределённый трейсинг через OpenTelemetry
+
+### Какие метрики собираем
+
+- `API Gateway / Orchestrator`: RPS, latency, доля `2xx/4xx/5xx`, rate-limit rejects
+- `Wallet Service`: reserve/commit/release latency, number of insufficient funds, terminal event processing failures, outbox lag
+- `Transaction Service`: provider call latency, timeout count, retry count, circuit breaker state, pending payments count, outbox lag
+- `Callback Service`: callback throughput, invalid signature count, normalization failures, callback to internal API latency
+- `Payment Query Service`: cache hit ratio, query latency, consumer lag, projection update failures
+- `Kafka`: consumer lag, publish/consume throughput, DLQ growth
+- `RabbitMQ`: queue depth, retry queue age, DLQ size, consumer utilization
+- внешний провайдер: success rate, error rate, p95 latency, timeout rate
+
+### SLI / SLO
+
+| SLI | SLO | Где меряем |
+|---|---|---|
+| Успешность `createPayment` без `5xx` | `>= 99.9%` за `30 дней` | `API Gateway` + `Orchestrator` |
+| `p95` latency `POST /api/payments` | `<= 2 s` | `Gateway` + `Wallet Service` |
+| Доля вызовов провайдера с timeout/transport error | `<= 1%` от всех попыток за `7 дней` | `Transaction Service` |
+| Доля событий, попавших в DLQ | `<= 0.1%` от общего event volume | `Kafka` / `RabbitMQ` metrics |
+| Доля расхождений между terminal state в `Wallet` и `Transaction` | `0%` для подтверждённых платежей | reconcile job / observability pipeline |
+
+### Дашборды
+
+- `Payment Operations Dashboard`: create payment throughput, reserve latency, success/fail ratio, pending payments, outbox lag, wallet/query consumer lag
+- `Provider Health Dashboard`: latency, timeout rate, retry volume, breaker state, размер очереди повторных вызовов провайдера, количество late callback-ов
+- `Transaction Service Health Dashboard`: CPU, memory / heap, GC pauses, saturation worker threads, executor queue depth, HTTP connection pool usage, HikariCP active / idle / pending connections, provider retry rate, outbox lag
+
+## Стратегия масштабирования и отказоустойчивости
+
+- `Wallet Service`, `Transaction Service`, `Callback Service`, `Payment Query Service` и `Notifications Service` масштабируются горизонтально как stateless-инстансы поверх собственных БД и consumer group-ов
+- `Kafka` масштабируется через partitions топика `payments.events`; порядок сохраняется по `paymentId`
+- `RabbitMQ` разделяет фоновые задачи: provider retry, notification dispatch и DLQ не конкурируют с доменными событиями
+- при падении одного инстанса `Wallet` / `Transaction` / `Callback` нагрузку берут остальные инстансы, а незавершённые сообщения дочитываются consumer group-ой
+- при временной недоступности провайдера платёж не переводится в terminal fail мгновенно: сначала используется bounded retry и deferred processing
+- при всплеске чтений нагрузка снимается через `Redis Cache`, а тяжёлые аналитические запросы не выполняются через `Payment Query Service`
+
 ## Нефункциональные аспекты
 
-- `Idempotency`: внешний `CreatePayment` поддерживает `IdempotencyKey`; обработчики событий используют уникальные ограничения, дедупликацию в read-модели и проверки терминальных состояний
-- `Наблюдаемость`: все сервисы пробрасывают `correlation_id`, `payment_id`, `attempt_id`; трассировка строится через OpenTelemetry
-- `Отказоустойчивость`: на синхронных вызовах используются таймауты, circuit breaker и безопасные деградационные статусы; асинхронные контуры имеют `DLQ`
-- `Масштабирование`: `Customer`, `Merchant Registry`, `Payments`, `Wallet`, `Notifications`, `Callbacks`, `Analytics / DWH` и `Anti-Fraud` масштабируются независимо, потому что ключевые данные разделены по контекстам
+- `Idempotency`: внешний `CreatePayment` поддерживает `requestId`; обработчики событий используют уникальные ограничения, дедупликацию в read-модели и проверки терминальных состояний
+- `Наблюдаемость`: все сервисы пробрасывают `correlation_id`, `payment_id`, `attempt_id` и экспортируют метрики в единый стек наблюдаемости
+- `Отказоустойчивость`: синхронные вызовы защищены timeout/retry/circuit breaker, асинхронные контуры изолированы через очереди и DLQ
+- `Масштабирование`: денежный путь, retry jobs, callback processing, read traffic и notifications разделены по пулам, consumer-ам и брокерам
 - `Изоляция legacy`: любые изменения модели `Core Banking` локализованы в `Core Integration / ACL`
 
 ## Вывод
 
-На уровне всей вертикали денежный путь отделён от уведомлений, callback-доставки, аналитики и legacy-интеграций. Ответственность между контекстами разделена явно: `Customer` владеет KYC и договорами, `Merchant Registry` - merchant-конфигурацией, `Payments` управляет жизненным циклом платежа, `Wallet` отвечает за операционный баланс, `Anti-Fraud` принимает онлайн-решение, `Analytics / DWH` хранит витрины и исторические данные, а `Core Banking` остаётся за `ACL`.
+Платёжная вертикаль разделена по домену и по runtime-ролям: `Wallet Service` отвечает за деньги, `Transaction Service` - за внешний статус, `Callback Service` - за адаптацию callback-ов, `Payment Query Service` - за read-модель, а `Kafka` связывает шаги саги через outbox. Поверх этого контура добавлен эксплуатационный слой.
 
-В детальном сценарии внешнего платежа `Wallet Service` отвечает за деньги, `Transaction Service` - за внешний статус операции, `Callback Service` - за приём и нормализацию callback-а, `Payment Query Service` - за read-модель. Сага движется событиями через `Kafka`, outbox связывает локальные транзакции с публикацией событий, а `CQRS` отделяет чтение от write-моделей.
+Теперь устойчивость достигается не одной идеей, а набором согласованных решений: bounded retry и circuit breaker на вызовах провайдера, deferred processing через очередь, DLQ для плохих сообщений, cache-aside для безопасных чтений, а также единый стек метрик, логов и трейсов.
