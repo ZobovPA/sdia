@@ -1,0 +1,57 @@
+@startuml
+title Provider Resilience - Timeout, Retry, Circuit Breaker, Fallback
+autonumber
+skinparam shadowing false
+
+actor Client as client
+participant "API Gateway" as gateway
+participant "Orchestrator / API" as orchestrator
+participant "Wallet Service" as wallet
+database "Wallet DB" as walletDb
+participant "Wallet Outbox Publisher" as walletPublisher
+queue "Kafka" as kafka
+participant "Transaction Service" as transaction
+database "Transaction DB" as transactionDb
+queue "RabbitMQ" as rabbit
+participant "External Provider" as provider
+participant "Timeout Monitor" as timeoutMonitor
+
+client -> gateway : POST /api/payments
+gateway -> orchestrator : create payment
+orchestrator -> wallet : reserveFunds(requestId, payload)
+wallet -> walletDb : tx: reserve + insert wallet_outbox
+walletDb --> wallet : commit
+wallet --> orchestrator : paymentId + RESERVED
+orchestrator --> gateway : 202 Accepted
+gateway --> client : payment accepted
+
+walletPublisher -> walletDb : poll wallet_outbox
+walletPublisher -> kafka : PaymentInitiated
+kafka -> transaction : PaymentInitiated
+transaction -> transactionDb : create PROVIDER_PENDING
+
+group Sync provider attempts
+  transaction -> provider : try #1 (timeout 2s)
+  ... timeout ...
+  transaction -> transaction : backoff + retry budget check
+  transaction -> provider : try #2
+  ... 5xx / timeout ...
+  transaction -> transaction : breaker failure counter++
+  transaction -> provider : try #3
+  ... timeout ...
+  transaction -> transaction : circuit breaker opens
+end
+
+transaction -> transactionDb : keep PROVIDER_PENDING
+transaction -> rabbit : publish provider.retry job
+transaction --> client : no direct response,\npayment stays processing
+
+... provider remains unavailable ...
+timeoutMonitor -> transaction : scan expired pending payments
+transaction -> transactionDb : tx: mark TIMEOUT + insert payment_outbox(PaymentFailed)
+transactionDb --> transaction : commit
+transaction -> kafka : PaymentFailed(providerStatus=TIMEOUT)
+kafka -> wallet : PaymentFailed
+wallet -> walletDb : tx: release reserve + mark CANCELLED
+
+@enduml

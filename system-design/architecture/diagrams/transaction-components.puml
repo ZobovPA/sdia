@@ -2,16 +2,20 @@
 !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
 LAYOUT_LEFT_RIGHT()
 
-title Transaction Service - C4 Component
+title Transaction Service - C4 Component with Resilience
 
 Container_Ext(kafka, "Kafka", "Message Broker", "Передаёт PaymentInitiated и terminal events")
+Container_Ext(rabbitmq, "RabbitMQ", "Queue Broker", "provider.retry jobs and operational DLQ")
 System_Ext(provider, "External Provider", "Исполняет внешний платёж")
 Container_Ext(callbackServiceExt, "Callback Service", "REST", "Передаёт нормализованный provider result")
+Container_Ext(alloy, "Grafana Alloy", "Telemetry Collector", "Собирает метрики, логи и трейсы")
 
 Container_Boundary(transactionBoundary, "Transaction Service") {
   Component(initiatedConsumer, "PaymentInitiated Consumer", "Kafka consumer", "Принимает PaymentInitiated")
   Component(initiateHandler, "Initiate Payment Handler", "Application Service", "Создаёт PROVIDER_PENDING и запускает provider flow")
+  Component(providerPolicy, "Provider Resilience Policy", "Resilience layer", "Timeout, retry, circuit breaker, bulkhead, rate limit")
   Component(providerClient, "Provider Client", "HTTP client", "Вызывает провайдера и передаёт paymentId как reference")
+  Component(retryJobProducer, "Retry Job Producer", "Queue producer", "Ставит provider.retry job при degraded fallback")
   Component(callbackApi, "Callback Result API", "REST endpoint", "Принимает POST /internal/provider-results")
   Component(providerResultHandler, "Provider Result Handler", "Application Service", "Финализирует внешний статус по callback или timeout")
   Component(timeoutMonitor, "Timeout Monitor", "Scheduled job", "Ищет просроченные PROVIDER_PENDING платежи")
@@ -20,6 +24,7 @@ Container_Boundary(transactionBoundary, "Transaction Service") {
   Component(callbackRepo, "Provider Callback Repository", "Repository", "Работает с provider_callbacks")
   Component(outboxWriter, "Outbox Writer", "Application Service", "Записывает PaymentCompleted и PaymentFailed в payment_outbox")
   Component(outboxPublisher, "Outbox Publisher", "Polling publisher", "Читает payment_outbox и публикует terminal events")
+  Component(metrics, "Metrics / Trace Export", "OpenTelemetry", "Экспортирует provider latency, retry count, breaker state, outbox lag")
   ContainerDb(transactionDb, "Transaction DB", "PostgreSQL", "payments, provider_callbacks, payment_outbox")
 }
 
@@ -27,8 +32,11 @@ Rel(kafka, initiatedConsumer, "PaymentInitiated", "async")
 Rel(initiatedConsumer, initiateHandler, "start provider flow")
 Rel(initiateHandler, txIdempotency, "check paymentId")
 Rel(initiateHandler, paymentRepo, "create PROVIDER_PENDING")
-Rel(initiateHandler, providerClient, "send payment request with paymentId reference")
+Rel(initiateHandler, providerPolicy, "provider request")
+Rel(providerPolicy, providerClient, "send request if limiter / breaker allow")
+Rel(providerPolicy, retryJobProducer, "fallback to provider.retry if sync attempts exhausted")
 Rel(providerClient, provider, "initiate payment", "HTTPS")
+Rel(retryJobProducer, rabbitmq, "provider.retry / provider.retry.dlq", "async")
 
 Rel(callbackServiceExt, callbackApi, "POST /internal/provider-results", "REST")
 Rel(callbackApi, providerResultHandler, "provider result")
@@ -45,5 +53,11 @@ Rel(callbackRepo, transactionDb, "reads/writes")
 Rel(outboxWriter, transactionDb, "writes")
 Rel(outboxPublisher, transactionDb, "poll payment_outbox")
 Rel(outboxPublisher, kafka, "publish terminal events", "async")
+
+Rel(initiateHandler, metrics, "record start / fallback")
+Rel(providerPolicy, metrics, "record timeout / retry / breaker state")
+Rel(providerResultHandler, metrics, "record provider result")
+Rel(outboxPublisher, metrics, "record outbox lag")
+Rel(metrics, alloy, "metrics/logs/traces")
 
 @enduml

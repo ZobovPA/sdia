@@ -2,14 +2,15 @@
 !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
 LAYOUT_LEFT_RIGHT()
 
-title Payment Processing - C4 Container
+title Payment Processing - C4 Container with Resilience and Observability
 
 Person(client, "Клиент", "Mobile / Web клиент")
 System_Ext(provider, "External Provider", "Внешний платёжный провайдер")
+System_Ext(notificationProvider, "Notification Provider", "SMS / Push / Email провайдер")
 
 System_Boundary(paymentPlatform, "Payment Processing Platform") {
-  Container(gateway, "API Gateway", "HTTPS Gateway", "Маршрутизация внешних клиентских запросов и provider callback")
-  Container(orchestrator, "Orchestrator / API", "REST", "Стартует платёжную сагу и читает статус из query-модели")
+  Container(gateway, "API Gateway", "HTTPS Gateway", "Маршрутизация запросов, auth, rate limit, trace-id")
+  Container(orchestrator, "Orchestrator / API", "REST", "Стартует платёжную сагу и читает status/history")
 
   Container_Boundary(walletBoundary, "Wallet Service") {
     Container(walletService, "Wallet Service", "REST + Kafka consumer", "Проверка баланса, резерв, списание, компенсация")
@@ -18,9 +19,10 @@ System_Boundary(paymentPlatform, "Payment Processing Platform") {
   }
 
   Container_Boundary(transactionBoundary, "Transaction Service") {
-    Container(transactionService, "Transaction Service", "REST + Kafka consumer", "Технический статус платежа, интеграция с провайдером, timeout")
+    Container(transactionService, "Transaction Service", "REST + Kafka consumer", "Технический статус платежа, вызов провайдера, retry / CB / timeout")
     ContainerDb(transactionDb, "Transaction DB", "PostgreSQL", "payments, provider_callbacks, payment_outbox")
     Container(transactionOutboxPublisher, "Transaction Outbox Publisher", "Polling publisher", "Читает payment_outbox и публикует terminal events")
+    Container(timeoutMonitor, "Timeout Monitor", "Scheduled worker", "Завершает просроченные PROVIDER_PENDING")
   }
 
   Container_Boundary(callbackBoundary, "Callback Service") {
@@ -28,11 +30,29 @@ System_Boundary(paymentPlatform, "Payment Processing Platform") {
   }
 
   Container_Boundary(queryBoundary, "Payment Query Service") {
-    Container(queryService, "Payment Query Service", "REST + Kafka", "Строит read-модель платежей из событий")
+    Container(queryService, "Payment Query Service", "REST + Kafka", "Строит read-модель и обслуживает чтения")
     ContainerDb(queryDb, "Query DB", "PostgreSQL", "payment_view, query_processed_events")
+    Container(redis, "Redis Cache", "Redis", "Cache-Aside для payment status и history")
   }
 
-  Container(kafka, "Kafka", "Message Broker", "PaymentInitiated, PaymentCompleted, PaymentFailed")
+  Container_Boundary(notificationsBoundary, "Notifications Service") {
+    Container(notificationsService, "Notifications Service", "RabbitMQ consumer + HTTP", "Отправляет уведомления и управляет retry")
+  }
+
+  Container_Boundary(brokerBoundary, "Messaging") {
+    Container(kafka, "Kafka payments.events", "Event Streaming", "Основной доменный топик PaymentInitiated / PaymentCompleted / PaymentFailed")
+    Container(kafkaDlq, "Kafka DLQ Topics", "Event Streaming", "payments.transaction.dlq, payments.wallet.dlq, payments.query.dlq")
+    Container(rabbitmq, "RabbitMQ Operational Queues", "Queue Broker", "provider.retry, notifications.dispatch")
+    Container(rabbitDlq, "RabbitMQ DLQ", "Queue Broker", "provider.retry.dlq, notifications.dlq, callbacks.invalid.dlq")
+  }
+
+  Container_Boundary(observabilityBoundary, "Observability") {
+    Container(alloy, "Grafana Alloy", "Telemetry Collector", "Собирает метрики, логи и трейсы")
+    Container(prometheus, "Prometheus", "Metrics Store", "Метрики сервисов, брокеров и инфраструктуры")
+    Container(loki, "Loki", "Log Store", "Централизованные структурированные логи")
+    Container(tempo, "Tempo", "Trace Store", "OpenTelemetry traces")
+    Container(grafana, "Grafana", "Dashboards", "Dashboards, alerts, SLI / SLO")
+  }
 }
 
 Rel(client, gateway, "Создание платежа, история, статус", "HTTPS")
@@ -41,8 +61,8 @@ Rel(provider, gateway, "Provider callback", "HTTPS")
 Rel(gateway, orchestrator, "Client API", "REST")
 Rel(gateway, callbackService, "Callback API", "REST")
 
-Rel(orchestrator, walletService, "reserveFunds", "REST")
-Rel(orchestrator, queryService, "GetPaymentStatus / GetUserPayments", "REST")
+Rel(orchestrator, walletService, "reserveFunds", "REST timeout + bounded retry")
+Rel(orchestrator, queryService, "GetPaymentStatus / GetUserPayments", "REST + cache lookup")
 
 Rel(walletService, walletDb, "Чтение/запись")
 Rel(walletOutboxPublisher, walletDb, "poll wallet_outbox")
@@ -51,13 +71,44 @@ Rel(walletOutboxPublisher, kafka, "PaymentInitiated", "async")
 Rel(kafka, transactionService, "PaymentInitiated", "async")
 Rel(kafka, walletService, "PaymentCompleted / PaymentFailed", "async")
 Rel(kafka, queryService, "PaymentInitiated / PaymentCompleted / PaymentFailed", "async")
+Rel(kafka, notificationsService, "terminal payment events", "async")
+Rel(kafka, kafkaDlq, "failed consumer events -> DLQ", "async")
 
 Rel(transactionService, transactionDb, "Чтение/запись")
-Rel(transactionService, provider, "Initiate payment", "HTTPS")
+Rel(transactionService, provider, "Initiate payment", "HTTPS timeout + retry + circuit breaker")
 Rel(callbackService, transactionService, "POST /internal/provider-results", "REST")
 Rel(transactionOutboxPublisher, transactionDb, "poll payment_outbox")
 Rel(transactionOutboxPublisher, kafka, "PaymentCompleted / PaymentFailed", "async")
+Rel(timeoutMonitor, transactionDb, "scan PROVIDER_PENDING")
+Rel(transactionService, rabbitmq, "provider.retry jobs", "async")
+Rel(transactionService, rabbitDlq, "invalid callbacks / exhausted retries", "async")
 
 Rel(queryService, queryDb, "Чтение/запись")
+Rel(queryService, redis, "cache-aside", "read/write")
+
+Rel(notificationsService, rabbitmq, "notifications.dispatch", "async")
+Rel(notificationsService, rabbitDlq, "notifications.dlq", "async")
+Rel(notificationsService, notificationProvider, "Send notification", "HTTPS timeout + retry + circuit breaker")
+
+Rel(kafkaDlq, rabbitmq, "manual re-drive / operational replay", "bridge")
+
+Rel(gateway, alloy, "metrics/logs/traces")
+Rel(orchestrator, alloy, "metrics/logs/traces")
+Rel(walletService, alloy, "metrics/logs/traces")
+Rel(transactionService, alloy, "metrics/logs/traces")
+Rel(callbackService, alloy, "metrics/logs/traces")
+Rel(queryService, alloy, "metrics/logs/traces")
+Rel(notificationsService, alloy, "metrics/logs/traces")
+Rel(kafka, alloy, "broker metrics")
+Rel(kafkaDlq, alloy, "DLQ metrics")
+Rel(rabbitmq, alloy, "queue metrics")
+Rel(rabbitDlq, alloy, "DLQ metrics")
+
+Rel(alloy, prometheus, "remote write / scrape pipeline")
+Rel(alloy, loki, "ship logs")
+Rel(alloy, tempo, "ship traces")
+Rel(grafana, prometheus, "query")
+Rel(grafana, loki, "query")
+Rel(grafana, tempo, "query")
 
 @enduml

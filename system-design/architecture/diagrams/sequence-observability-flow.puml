@@ -1,0 +1,42 @@
+@startuml
+title Observability Flow - Trace ID, Metrics and Logs
+autonumber
+skinparam shadowing false
+
+actor Client as client
+participant "API Gateway" as gateway
+participant "Orchestrator / API" as orchestrator
+participant "Wallet Service" as wallet
+participant "Transaction Service" as transaction
+participant "Callback Service" as callback
+participant "Payment Query Service" as query
+participant "Grafana Alloy" as alloy
+database "Prometheus" as prometheus
+database "Loki" as loki
+database "Tempo" as tempo
+participant "Grafana" as grafana
+
+client -> gateway : POST /api/payments
+gateway -> gateway : generate / forward trace-id,\ncorrelation-id, request-id
+gateway -> orchestrator : create payment + trace headers
+orchestrator -> wallet : reserveFunds + trace headers
+wallet -> transaction : PaymentInitiated path continues\nthrough Kafka with trace context
+transaction -> callback : provider callback processing\ncontinues same correlation
+transaction -> query : terminal event updates read-model
+
+gateway -> alloy : access log + http metrics + trace spans
+orchestrator -> alloy : app logs + latency metrics + spans
+wallet -> alloy : reserve/commit metrics + logs + spans
+transaction -> alloy : provider latency / retry / CB metrics + logs + spans
+callback -> alloy : callback validation logs + metrics + spans
+query -> alloy : cache hit ratio + query latency + spans
+
+alloy -> prometheus : metrics
+alloy -> loki : structured logs
+alloy -> tempo : traces
+
+grafana -> prometheus : dashboards / alerts
+grafana -> loki : log search
+grafana -> tempo : trace exploration
+
+@enduml

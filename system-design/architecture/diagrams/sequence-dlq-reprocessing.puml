@@ -1,0 +1,39 @@
+@startuml
+title DLQ Flow - Repeated Consumer Failure and Reprocessing
+autonumber
+skinparam shadowing false
+
+queue "Kafka payments.events" as kafka
+participant "Wallet Consumer" as walletConsumer
+participant "Retry Policy" as retryPolicy
+queue "payments.wallet.dlq" as dlq
+participant "DLQ Reprocessor" as reprocessor
+database "Wallet DB" as walletDb
+actor "Support / Backoffice" as support
+
+kafka -> walletConsumer : PaymentFailed
+walletConsumer -> retryPolicy : process attempt #1
+retryPolicy -> walletDb : update wallet transaction
+walletDb --> retryPolicy : transient DB error
+retryPolicy --> walletConsumer : retry with backoff
+
+kafka -> walletConsumer : PaymentFailed redelivery
+walletConsumer -> retryPolicy : process attempt #2
+retryPolicy -> walletDb : update wallet transaction
+walletDb --> retryPolicy : transient DB error
+retryPolicy --> walletConsumer : retry with backoff
+
+kafka -> walletConsumer : PaymentFailed redelivery
+walletConsumer -> retryPolicy : process attempt #3
+retryPolicy -> walletDb : update wallet transaction
+walletDb --> retryPolicy : still failing
+retryPolicy -> dlq : publish original event + error context
+
+support -> dlq : inspect failed message
+support -> reprocessor : trigger re-drive after fix
+reprocessor -> dlq : read message
+reprocessor -> kafka : republish PaymentFailed
+kafka -> walletConsumer : PaymentFailed re-driven
+walletConsumer -> walletDb : apply release / mark CANCELLED
+
+@enduml

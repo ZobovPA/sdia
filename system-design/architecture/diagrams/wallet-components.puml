@@ -2,25 +2,29 @@
 !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
 LAYOUT_LEFT_RIGHT()
 
-title Wallet Service - C4 Component
+title Wallet Service - C4 Component with Resilience
 
 Container_Ext(orchestrator, "Orchestrator / API", "REST", "Вызывает reserveFunds")
 Container_Ext(kafka, "Kafka", "Message Broker", "Передаёт terminal events")
+Container_Ext(dlqTopic, "payments.wallet.dlq", "DLQ topic", "Сообщения после исчерпания попыток")
+Container_Ext(alloy, "Grafana Alloy", "Telemetry Collector", "Собирает метрики, логи и трейсы")
 
 Container_Boundary(walletBoundary, "Wallet Service") {
   Component(reserveApi, "ReserveFunds API", "REST endpoint", "Принимает команду reserveFunds")
   Component(reserveHandler, "Reserve Command Handler", "Application Service", "Проверяет баланс и по requestId создаёт или возвращает payment")
   Component(terminalConsumer, "Terminal Event Consumer", "Kafka consumer", "Обрабатывает PaymentCompleted и PaymentFailed")
+  Component(retryGuard, "Retry / DLQ Policy", "Consumer policy", "Ограничивает число попыток и переводит сообщение в DLQ")
   Component(finalizeHandler, "Finalize Command Handler", "Application Service", "Исполняет commitFunds и releaseFunds")
   Component(walletIdempotency, "Idempotency Guard", "Application Service", "Проверяет requestId, request fingerprint и terminal state")
   Component(walletRepo, "Wallet Repository", "Repository", "Читает и обновляет wallets")
   Component(txRepo, "Wallet Transaction Repository", "Repository", "Работает с wallet_transactions")
   Component(outboxWriter, "Outbox Writer", "Application Service", "Записывает PaymentInitiated в wallet_outbox")
   Component(outboxPublisher, "Outbox Publisher", "Polling publisher", "Читает wallet_outbox и публикует PaymentInitiated")
+  Component(metrics, "Metrics / Trace Export", "OpenTelemetry", "Экспортирует latency, errors, consumer lag, outbox lag")
   ContainerDb(walletDb, "Wallet DB", "PostgreSQL", "wallets, wallet_transactions, wallet_outbox")
 }
 
-Rel(orchestrator, reserveApi, "reserveFunds", "REST")
+Rel(orchestrator, reserveApi, "reserveFunds", "REST timeout + bounded retry")
 Rel(reserveApi, reserveHandler, "reserveFunds")
 Rel(reserveHandler, walletIdempotency, "check requestId / request fingerprint")
 Rel(reserveHandler, walletRepo, "lock wallet")
@@ -28,7 +32,9 @@ Rel(reserveHandler, txRepo, "create RESERVED payment row")
 Rel(reserveHandler, outboxWriter, "write PaymentInitiated")
 
 Rel(kafka, terminalConsumer, "PaymentCompleted / PaymentFailed", "async")
-Rel(terminalConsumer, finalizeHandler, "terminal event")
+Rel(terminalConsumer, retryGuard, "delivery attempt")
+Rel(retryGuard, finalizeHandler, "terminal event if retry budget remains")
+Rel(retryGuard, dlqTopic, "publish to DLQ after N attempts", "async")
 Rel(finalizeHandler, walletIdempotency, "check terminal state")
 Rel(finalizeHandler, walletRepo, "update balances")
 Rel(finalizeHandler, txRepo, "mark COMPLETED / CANCELLED")
@@ -39,5 +45,10 @@ Rel(txRepo, walletDb, "reads/writes")
 Rel(outboxWriter, walletDb, "writes")
 Rel(outboxPublisher, walletDb, "poll wallet_outbox")
 Rel(outboxPublisher, kafka, "PaymentInitiated", "async")
+
+Rel(reserveApi, metrics, "record latency / result")
+Rel(terminalConsumer, metrics, "record retries / failures / lag")
+Rel(outboxPublisher, metrics, "record outbox lag")
+Rel(metrics, alloy, "metrics/logs/traces")
 
 @enduml
