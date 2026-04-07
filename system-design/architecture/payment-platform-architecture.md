@@ -333,7 +333,7 @@ Kafka хорошо решает задачу журнала событий, но
 
 - `wallets` - состояние баланса
 - `wallet_transactions` - одна mutable-запись по каждому `paymentId`, отражающая жизненный цикл денежной операции в кошельке и mapping внешнего `requestId` на внутренний `paymentId`
-- `wallet_outbox` - событие `PaymentInitiated`
+- `wallet_outbox` - события `PaymentInitiated` и `PaymentExpired`, если резерв истёк до того, как старт саги ушёл в Kafka
 
 Локальная транзакция:
 
@@ -349,9 +349,11 @@ Kafka хорошо решает задачу журнала событий, но
 
 `wallet_transactions` в этой схеме не является append-only журналом отдельных резервов и финализаций. Это одна write-запись платежа внутри `Wallet Service`, которая меняет статус от `RESERVED` к терминальному состоянию.
 
-Важно: статус `wallet_transactions` не равен публичному статусу платежа в read-модели. `Wallet Service` фиксирует внутреннее бухгалтерское состояние денег (`RESERVED`, `COMPLETED`, `CANCELLED`), тогда как внешний жизненный цикл платежа (`COMPLETED`, `FAILED`, `TIMEOUT`) принадлежит `Transaction Service`.
+Важно: статус `wallet_transactions` не равен публичному статусу платежа в read-модели. `Wallet Service` фиксирует внутреннее бухгалтерское состояние денег (`RESERVED`, `COMPLETED`, `CANCELLED`, `EXPIRED`), тогда как внешний жизненный цикл платежа после выхода к провайдеру (`COMPLETED`, `FAILED`, `TIMEOUT`) принадлежит `Transaction Service`.
 
 Именно `Wallet Service` хранит идемпотентный mapping `requestId -> paymentId`. Поэтому `Orchestrator` может оставаться stateless: при каждом `POST /api/payments` он передаёт `requestId` и бизнес-payload в `Wallet Service`, а тот либо создаёт новый платёж, либо возвращает уже существующий `paymentId`.
+
+Если `Wallet Outbox Publisher` надолго отстаёт или недоступен, `Hold Expiry Monitor` в `Wallet Service` сканирует записи `RESERVED` с истёкшим `hold_expires_at`. Он снимает резерв, переводит запись в `EXPIRED`, помечает неотправленный `PaymentInitiated` как `SKIPPED` и пишет в `wallet_outbox` самодостаточное событие `PaymentExpired`. За счёт этого деньги не остаются в hold бесконечно, а после восстановления publisher-а read-модель всё равно получает терминальный статус.
 
 ### Transaction Service
 
@@ -388,12 +390,13 @@ Read-модель обновляется только событиями:
 - `PaymentInitiated`
 - `PaymentCompleted`
 - `PaymentFailed`
+- `PaymentExpired`
 
 Каждое событие в потоке платежей несёт минимально достаточный набор бизнес-полей для восстановления `payment_view` без чтения из write-БД. `PaymentInitiated` дополнительно несёт `providerId`, реквизиты получателя и `merchantOrderId`, чтобы `Transaction Service` мог вызвать провайдера без обращения к чужой write-модели. Терминальные события повторяют ключевые атрибуты платежа: `walletId`, `merchantId`, `merchantOrderId`, `amount`, `currency`, `requestId`, `userId`, а также технические поля провайдера и timestamps.
 
 События публикуются в единый Kafka-топик `payments.events` с partition key = `paymentId`. Это даёт стабильный порядок событий в рамках одного платежа и упрощает replay read-модели.
 
-`Payment Query Service` проецирует внешний статус платежа из домена `Transaction Service`. Поэтому после компенсации в `Wallet Service` локальная запись может иметь статус `CANCELLED`, а пользовательская read-модель при этом показывает `FAILED` с причиной ошибки провайдера. Это не конфликт, а отражение разных моделей ответственности.
+`Payment Query Service` строит пользовательский статус в основном из терминальных событий `Transaction Service`, потому что именно он владеет внешним результатом платежа после выхода к провайдеру. Отдельное защитное исключение - `PaymentExpired`, которое приходит из `Wallet Service`, если hold истёк до старта внешней части саги. Поэтому после компенсации в `Wallet Service` локальная запись может иметь статус `CANCELLED`, а пользовательская read-модель при этом показывает `FAILED` с причиной ошибки провайдера. Это не конфликт, а отражение разных моделей ответственности.
 
 Для read-модели выбран `Postgres`, потому что запросы в этом контуре операционные и предсказуемые:
 
@@ -407,12 +410,12 @@ Read-модель обновляется только событиями:
 
 ### Где используется
 
-- в `Wallet Service` для `PaymentInitiated`
+- в `Wallet Service` для `PaymentInitiated` и защитного `PaymentExpired`
 - в `Transaction Service` для `PaymentCompleted` и `PaymentFailed`
 
 ### Почему выбран polling, а не CDC
 
-В этой схеме выбран `polling publisher`, потому что поток событий здесь предсказуемый: на один платёж приходится одно исходящее событие из `Wallet Service` и одно терминальное событие из `Transaction Service`. Для такого профиля нагрузки достаточно периодически читать outbox по индексу `status + created_at` и публиковать новые записи пачками.
+В этой схеме выбран `polling publisher`, потому что поток событий здесь предсказуемый: на один платёж обычно приходится одно исходящее событие из `Wallet Service`, одно терминальное событие из `Transaction Service` и только в редком защитном сценарии появляется `PaymentExpired`. Для такого профиля нагрузки достаточно периодически читать outbox по индексу `status + created_at` и публиковать новые записи пачками.
 
 Задержка в несколько сотен миллисекунд или единицы секунд между коммитом локальной транзакции и публикацией события для этого процесса допустима. Сага от этого не ломается: деньги уже зарезервированы локально, `Transaction Service` стартует почти сразу после публикации, а read-модель по условию задачи и так eventual consistent.
 
@@ -546,8 +549,8 @@ Write-команды идут в write-сервисы:
 |---|---|---|---|---|---|---|---|
 | `Orchestrator -> Wallet Service` (`reserveFunds`) | `500 ms` | `1` безопасный retry только на network timeout, потому что есть `requestId` | нет отдельного CB, fail-fast на уровне HTTP client | отдельный пул исходящих соединений к `Wallet` | внешний лимит ставится на `Gateway` | нет, если `Wallet` недоступен, create payment завершается ошибкой | денежный шаг должен быть быстрым и определённым |
 | `Orchestrator -> Payment Query Service` | `200 ms` | `1` retry с jitter | да, короткий CB на чтениях | отдельный read-pool | лимиты на `Gateway` по пользователю и клиентскому приложению | возврат краткоживущего stale cache из `Redis`, если read DB временно недоступна | чтение должно деградировать мягко и не влиять на деньги |
-| `Wallet Service -> Kafka` через outbox publisher | poll interval `200-500 ms` | retry публикации до `N` попыток с backoff | нет отдельного CB, но есть остановка publisher-а и алертинг | отдельный worker pool publisher-а | не требуется | запись остаётся в outbox до успешной публикации | outbox уже даёт атомарность, задача publisher-а - надёжно доставить событие |
-| `Transaction Service -> External Provider` | connect `300 ms`, response `2 s` | `2` retry по timeout/`5xx` с exponential backoff и jitter | да, open при высокой доле ошибок или timeout burst; half-open пробует ограниченное число запросов | отдельный HTTP client pool и worker pool на провайдера | локальный limiter по провайдеру + gateway limit на внешний вход | запись остаётся в `PROVIDER_PENDING`, ставится job в `provider.retry`, пользователь видит платёж как processing | внешний провайдер - самый нестабильный участок системы |
+| `Wallet Service -> Kafka` через outbox publisher | poll interval `200-500 ms` | retry публикации до `N` попыток с backoff | нет отдельного CB, но есть остановка publisher-а и алертинг | отдельный worker pool publisher-а | не требуется | при длительном лаге `Hold Expiry Monitor` снимает резерв и пишет `PaymentExpired`; stale `PaymentInitiated` помечается `SKIPPED` | outbox уже даёт атомарность, задача publisher-а - надёжно доставить событие и не держать деньги в hold бесконечно |
+| `Transaction Service -> External Provider` | connect `300 ms`, response `2 s` | `2` retry после первой попытки (`3` попытки всего) по timeout/`5xx` с exponential backoff и jitter | да, open при высокой доле ошибок или timeout burst; half-open пробует ограниченное число запросов | отдельный HTTP client pool и worker pool на провайдера | локальный limiter по провайдеру + gateway limit на внешний вход | запись остаётся в `PROVIDER_PENDING`, ставится job в `provider.retry`, пользователь видит платёж как processing | внешний провайдер - самый нестабильный участок системы |
 | `Wallet / Payments -> Core Integration / ACL` | `1 s` | только для безопасных read/check запросов; без слепых retry для posting | да | отдельный пул и очередь в ACL | локальные лимиты на legacy | `POSTING_PENDING` и асинхронный догон через очередь | legacy не должен ломать пользовательский путь |
 | `Notifications Service -> SMS/email/push providers` | `1 s` | до `5` попыток с exponential backoff | да, отдельный CB на каждого провайдера | worker pool per provider | лимиты по провайдеру и шаблону рассылки | deferred retry в очереди, затем `notifications.dlq` | уведомления важны, но не должны мешать платежу |
 | `Callback Service -> Transaction Service` | `300 ms` | `2` retry на сетевые ошибки | короткий CB | отдельный internal REST pool | лимит на callback endpoint в gateway | invalid callback уходит в `callbacks.invalid.dlq` | защищаем внутренний write-контур от шторма callback-ов |
@@ -569,7 +572,7 @@ Write-команды идут в write-сервисы:
 |---|---|---|---|---|
 | `PaymentInitiated -> Transaction Service` | `Kafka` | event | да, `payments.transaction.dlq` | ручной re-drive после разбора payload / бага consumer-а |
 | `PaymentCompleted / PaymentFailed -> Wallet Service` | `Kafka` | event | да, `payments.wallet.dlq` | после `N` неуспешных попыток событие уходит в DLQ, создаётся алерт и задача на re-drive |
-| `PaymentInitiated / PaymentCompleted / PaymentFailed -> Query Service` | `Kafka` | event | да, `payments.query.dlq` | повторная проекция или ручной replay из журнала |
+| `PaymentInitiated / PaymentCompleted / PaymentFailed / PaymentExpired -> Query Service` | `Kafka` | event | да, `payments.query.dlq` | повторная проекция или ручной replay из журнала |
 | `Provider retry job` | `RabbitMQ` | job | да, `provider.retry.dlq` | ручной разбор, если провайдер долго недоступен или payload неконсистентен |
 | `Notification dispatch` | `RabbitMQ` | job | да, `notifications.dlq` | повтор, ограничение скорости, ручной re-drive для долгих отказов |
 | `Invalid provider callback` | `RabbitMQ` | command / job | да, `callbacks.invalid.dlq` | payload сохраняется для аудита и ручной проверки подписи / маппинга |
@@ -582,9 +585,26 @@ Write-команды идут в write-сервисы:
 - у consumer-ов задаются `max concurrency`, `prefetch` и верхние лимиты на reprocessing batch size
 - DLQ не переигрывается автоматически бесконечно; после заданного числа попыток событие уходит в отдельный контур разбора
 
+### Конкретные настройки consumer-ов
+
+| Контур | Ключевые настройки | Почему так |
+|---|---|---|
+| `Kafka` consumer в `Transaction Service` | `enable.auto.commit=false`, `max.poll.records=50`, `max.poll.interval.ms=120000`, `max.partition.fetch.bytes=1048576`, `fetch.max.bytes=8388608`, worker pool `8-16` | ограниченный batch, ручной commit после локальной транзакции, предсказуемое время обработки без ребалансов |
+| `Kafka` consumer в `Wallet Service` | `enable.auto.commit=false`, `max.poll.records=20`, `max.poll.interval.ms=120000`, обработка по `paymentId` без параллельного выполнения внутри одного ключа, worker pool `4-8` | terminal events должны применяться последовательно по одному платежу и не дублировать release/commit |
+| `Kafka` consumer в `Payment Query Service` | `enable.auto.commit=false`, `max.poll.records=100`, `max.poll.interval.ms=120000`, `fetch.max.bytes=8388608`, batch upsert в `Query DB` до `100` строк | read-модель терпит более крупный batch, но commit делается только после успешного обновления projection или записи в DLQ |
+| `RabbitMQ` consumer для `provider.retry` | `prefetch=20`, worker pool `8-16`, ack только после записи нового локального статуса или after-publish в DLQ | ограничиваем число in-flight retry, не захламляем память и не теряем задачи при рестарте worker-а |
+| `RabbitMQ` consumer для `notifications.dispatch` | `prefetch=50`, отдельный pool на каждого notification provider, rate limit на endpoint провайдера | шумный notification provider не должен забивать весь notification-контур |
+
+### Какие ошибки retryable, а какие сразу уходят в DLQ
+
+- retryable: network timeout, `5xx`, временная недоступность БД, короткие ошибки брокера, optimistic locking / transient contention
+- сразу в `DLQ`: schema / deserialization error, невалидная подпись callback-а, отсутствующий обязательный `paymentId`, неподдерживаемый `eventType`, неконсистентный payload
+- offset в `Kafka` коммитится только после успешной локальной транзакции handler-а или после надёжной записи события в `DLQ`; auto-commit не используется
+- в `RabbitMQ` ack отправляется только после успешной обработки, requeue или публикации в `DLQ`
+
 ### Как работает fallback при проблемах с провайдером
 
-Если провайдер отвечает медленно или серия вызовов начинает завершаться timeout/`5xx`, `Transaction Service` сначала делает ограниченные retry с backoff. Если лимит попыток исчерпан и breaker открывается, сервис не публикует терминальный `PaymentFailed` сразу. Вместо этого он сохраняет локальный статус `PROVIDER_PENDING`, ставит retry job в `RabbitMQ` и переводит обработку в асинхронный режим. Только когда истекает общее окно ожидания и повторные попытки не помогли, срабатывает `Timeout Monitor`, публикуется `PaymentFailed`, а `Wallet Service` снимает резерв.
+Если провайдер отвечает медленно или серия вызовов начинает завершаться timeout/`5xx`, `Transaction Service` сначала делает первую попытку и ещё два ограниченных retry с backoff. Если лимит попыток исчерпан и breaker открывается, сервис не публикует терминальный `PaymentFailed` сразу. Вместо этого он сохраняет локальный статус `PROVIDER_PENDING`, ставит retry job в `RabbitMQ` и переводит обработку в асинхронный режим. Только когда истекает общее окно ожидания и повторные попытки не помогли, срабатывает `Timeout Monitor`, в `payment_outbox` пишется `PaymentFailed`, а `Transaction Outbox Publisher` публикует событие, после чего `Wallet Service` снимает резерв.
 
 ## Кэширование
 
@@ -636,7 +656,7 @@ Write-команды идут в write-сервисы:
 |---|---|---|
 | Успешность `createPayment` без `5xx` | `>= 99.9%` за `30 дней` | `API Gateway` + `Orchestrator` |
 | `p95` latency `POST /api/payments` | `<= 2 s` | `Gateway` + `Wallet Service` |
-| Доля вызовов провайдера с timeout/transport error | `<= 1%` от всех попыток за `7 дней` | `Transaction Service` |
+| `p95` времени от приёма provider callback до публикации terminal event | `<= 5 s` | `Callback Service` + `Transaction Service` + outbox metrics |
 | Доля событий, попавших в DLQ | `<= 0.1%` от общего event volume | `Kafka` / `RabbitMQ` metrics |
 | Доля расхождений между terminal state в `Wallet` и `Transaction` | `0%` для подтверждённых платежей | reconcile job / observability pipeline |
 

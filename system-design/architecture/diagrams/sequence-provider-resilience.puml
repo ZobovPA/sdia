@@ -12,6 +12,7 @@ participant "Wallet Outbox Publisher" as walletPublisher
 queue "Kafka" as kafka
 participant "Transaction Service" as transaction
 database "Transaction DB" as transactionDb
+participant "Transaction Outbox Publisher" as transactionPublisher
 queue "RabbitMQ" as rabbit
 participant "External Provider" as provider
 participant "Timeout Monitor" as timeoutMonitor
@@ -31,26 +32,30 @@ kafka -> transaction : PaymentInitiated
 transaction -> transactionDb : create PROVIDER_PENDING
 
 group Sync provider attempts
-  transaction -> provider : try #1 (timeout 2s)
+  transaction -> provider : initial attempt (timeout 2s)
   ... timeout ...
   transaction -> transaction : backoff + retry budget check
-  transaction -> provider : try #2
+  transaction -> provider : retry #1
   ... 5xx / timeout ...
   transaction -> transaction : breaker failure counter++
-  transaction -> provider : try #3
+  transaction -> provider : retry #2
   ... timeout ...
   transaction -> transaction : circuit breaker opens
 end
 
 transaction -> transactionDb : keep PROVIDER_PENDING
 transaction -> rabbit : publish provider.retry job
-transaction --> client : no direct response,\npayment stays processing
+note over client, transaction
+Клиент уже получил 202 Accepted.
+Дальше платёж остаётся в processing асинхронно.
+end note
 
 ... provider remains unavailable ...
 timeoutMonitor -> transaction : scan expired pending payments
 transaction -> transactionDb : tx: mark TIMEOUT + insert payment_outbox(PaymentFailed)
 transactionDb --> transaction : commit
-transaction -> kafka : PaymentFailed(providerStatus=TIMEOUT)
+transactionPublisher -> transactionDb : poll payment_outbox
+transactionPublisher -> kafka : PaymentFailed(providerStatus=TIMEOUT)
 kafka -> wallet : PaymentFailed
 wallet -> walletDb : tx: release reserve + mark CANCELLED
 

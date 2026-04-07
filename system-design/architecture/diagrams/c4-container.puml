@@ -15,7 +15,8 @@ System_Boundary(paymentPlatform, "Payment Processing Platform") {
   Container_Boundary(walletBoundary, "Wallet Service") {
     Container(walletService, "Wallet Service", "REST + Kafka consumer", "Проверка баланса, резерв, списание, компенсация")
     ContainerDb(walletDb, "Wallet DB", "PostgreSQL", "wallets, wallet_transactions, wallet_outbox")
-    Container(walletOutboxPublisher, "Wallet Outbox Publisher", "Polling publisher", "Читает wallet_outbox и публикует PaymentInitiated")
+    Container(walletOutboxPublisher, "Wallet Outbox Publisher", "Polling publisher", "Читает wallet_outbox, публикует актуальные события и пропускает stale PaymentInitiated")
+    Container(holdExpiryMonitor, "Hold Expiry Monitor", "Scheduled worker", "Снимает просроченные hold и пишет PaymentExpired")
   }
 
   Container_Boundary(transactionBoundary, "Transaction Service") {
@@ -40,7 +41,7 @@ System_Boundary(paymentPlatform, "Payment Processing Platform") {
   }
 
   Container_Boundary(brokerBoundary, "Messaging") {
-    Container(kafka, "Kafka payments.events", "Event Streaming", "Основной доменный топик PaymentInitiated / PaymentCompleted / PaymentFailed")
+    Container(kafka, "Kafka payments.events", "Event Streaming", "Основной доменный топик PaymentInitiated / PaymentCompleted / PaymentFailed / PaymentExpired")
     Container(kafkaDlq, "Kafka DLQ Topics", "Event Streaming", "payments.transaction.dlq, payments.wallet.dlq, payments.query.dlq")
     Container(rabbitmq, "RabbitMQ Operational Queues", "Queue Broker", "provider.retry, notifications.dispatch")
     Container(rabbitDlq, "RabbitMQ DLQ", "Queue Broker", "provider.retry.dlq, notifications.dlq, callbacks.invalid.dlq")
@@ -66,13 +67,16 @@ Rel(orchestrator, queryService, "GetPaymentStatus / GetUserPayments", "REST + ca
 
 Rel(walletService, walletDb, "Чтение/запись")
 Rel(walletOutboxPublisher, walletDb, "poll wallet_outbox")
-Rel(walletOutboxPublisher, kafka, "PaymentInitiated", "async")
+Rel(walletOutboxPublisher, kafka, "PaymentInitiated / PaymentExpired", "async")
+Rel(holdExpiryMonitor, walletDb, "scan expired RESERVED holds")
 
 Rel(kafka, transactionService, "PaymentInitiated", "async")
 Rel(kafka, walletService, "PaymentCompleted / PaymentFailed", "async")
-Rel(kafka, queryService, "PaymentInitiated / PaymentCompleted / PaymentFailed", "async")
+Rel(kafka, queryService, "PaymentInitiated / PaymentCompleted / PaymentFailed / PaymentExpired", "async")
 Rel(kafka, notificationsService, "terminal payment events", "async")
-Rel(kafka, kafkaDlq, "failed consumer events -> DLQ", "async")
+Rel(transactionService, kafkaDlq, "payments.transaction.dlq on failed PaymentInitiated", "async")
+Rel(walletService, kafkaDlq, "payments.wallet.dlq on failed terminal event", "async")
+Rel(queryService, kafkaDlq, "payments.query.dlq on projection failure", "async")
 
 Rel(transactionService, transactionDb, "Чтение/запись")
 Rel(transactionService, provider, "Initiate payment", "HTTPS timeout + retry + circuit breaker")

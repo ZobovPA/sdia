@@ -24,11 +24,12 @@ package "Wallet DB" {
     payment_id : uuid <<UNIQUE>>
     request_id : uuid <<UNIQUE>>
     request_fingerprint : varchar
-    status : enum(RESERVED, COMPLETED, CANCELLED)
+    status : enum(RESERVED, COMPLETED, CANCELLED, EXPIRED)
     final_action : enum(COMMIT, RELEASE)
     amount_value : bigint
     currency : char(3)
     reserved_at : timestamptz
+    hold_expires_at : timestamptz
     finalized_at : timestamptz
     created_at : timestamptz
     updated_at : timestamptz
@@ -41,7 +42,7 @@ package "Wallet DB" {
     aggregate_id : uuid
     event_type : varchar
     payload_json : jsonb
-    status : enum(NEW, SENT, FAILED)
+    status : enum(NEW, SENT, FAILED, SKIPPED)
     created_at : timestamptz
     published_at : timestamptz
   }
@@ -147,6 +148,9 @@ note right of wallet_outbox
 Outbox row is inserted
 in the same transaction as
 wallet reserve / finalize.
+Stale PaymentInitiated can be
+marked SKIPPED if hold expires
+before publish.
 end note
 
 note right of payment_outbox
