@@ -6,6 +6,13 @@
 - `diagrams/context-map.puml` - карта bounded context-ов
 - `api-contracts.md` - внешние и внутренние API
 - `message-contracts.md` - сообщения брокера и соглашения по событиям
+- `security-auth.md` - OIDC/OAuth2, JWT validation, scopes и service-to-service trust
+- `webhooks-security.md` - HMAC подпись, anti-replay и идемпотентность callback-ов
+- `secrets-management.md` - Vault / K8s Secrets, injection и ротация
+- `deployment-strategy.md` - GitLab CI, ArgoCD, Argo Rollouts, canary / blue-green
+- `db-migration-feature-toggle.md` - zero-downtime миграция через expand / contract и feature flag
+- `release-checklist.md` - checklist релиза
+- `runbook.md` - operational runbook
 - `diagrams/c4-container.puml` - контейнерная диаграмма
 - `diagrams/wallet-components.puml` - компоненты `Wallet Service`
 - `diagrams/transaction-components.puml` - компоненты `Transaction Service`
@@ -17,7 +24,22 @@
 - `diagrams/sequence-dlq-reprocessing.puml` - повторные ошибки consumer-а и перевод сообщения в DLQ
 - `diagrams/sequence-cache-read.puml` - чтение статуса и истории через cache hit/miss
 - `diagrams/sequence-observability-flow.puml` - прохождение trace-id, метрик и логов по платёжному потоку
+- `diagrams/c4-container-auth-security.puml` - AuthN/AuthZ и service trust
+- `diagrams/sequence-oidc-auth-flow.puml` - OIDC Authorization Code Flow + API вызов
+- `diagrams/c4-container-webhook-security.puml` - webhook security и replay protection
+- `diagrams/sequence-webhook-security-flow.puml` - happy path и reject cases для callback-а
+- `diagrams/c4-container-vault-secrets.puml` - Vault, sidecar injection и workload identity
+- `diagrams/sequence-vault-rotation.puml` - pod startup, secret injection и rotation
+- `diagrams/c4-container-delivery-rollout.puml` - GitLab CI, ArgoCD и Argo Rollouts
+- `diagrams/sequence-rollout-canary.puml` - canary rollout и rollback
+- `diagrams/c4-container-feature-toggle-migration.puml` - feature toggle migration
+- `diagrams/sequence-expand-contract-migration.puml` - expand / contract migration flow
 - `diagrams/erd.puml` - схема write/read моделей и outbox-таблиц
+- `configs/.gitlab-ci.yml` - пример CI pipeline
+- `configs/rollout-canary.yaml` - пример Argo Rollout
+- `configs/gateway-config.md` - gateway policies
+- `configs/vault-policy.hcl` - пример Vault policy
+- `configs/k8s-secret-example.yaml` - пример базового K8s Secret
 
 ## Архитектурный контекст
 
@@ -682,6 +704,28 @@ Write-команды идут в write-сервисы:
 - `Отказоустойчивость`: синхронные вызовы защищены timeout/retry/circuit breaker, асинхронные контуры изолированы через очереди и DLQ
 - `Масштабирование`: денежный путь, retry jobs, callback processing, read traffic и notifications разделены по пулам, consumer-ам и брокерам
 - `Изоляция legacy`: любые изменения модели `Core Banking` локализованы в `Core Integration / ACL`
+
+## Security and Operations Layer
+
+Поверх доменной, интеграционной и эксплуатационной модели добавлен отдельный слой безопасности и безопасных изменений в production:
+
+- `OIDC/OAuth2` для пользовательских и service-to-service сценариев
+- webhook perimeter protection: HMAC, timestamp window, anti-replay и идемпотентность
+- внешний secret store через `Vault` с fallback-сценарием через `K8s Secrets`
+- безопасные релизы через `GitLab CI`, `ArgoCD`, `Argo Rollouts`, readiness и graceful shutdown
+- zero-downtime миграции через `expand / contract` и feature flags
+
+Эти решения описаны в отдельных артефактах:
+
+- [`security-auth.md`](./security-auth.md)
+- [`webhooks-security.md`](./webhooks-security.md)
+- [`secrets-management.md`](./secrets-management.md)
+- [`deployment-strategy.md`](./deployment-strategy.md)
+- [`db-migration-feature-toggle.md`](./db-migration-feature-toggle.md)
+- [`release-checklist.md`](./release-checklist.md)
+- [`runbook.md`](./runbook.md)
+
+Принцип здесь такой же, как и во всём документе: безопасность и операционка не перепридумывают платёжный процесс, а усиливают уже существующие `Saga`, `Outbox`, `CQRS`, `Resilience` и `Observability`.
 
 ## Вывод
 

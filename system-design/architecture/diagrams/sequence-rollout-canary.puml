@@ -1,0 +1,31 @@
+@startuml
+title Canary Rollout with Promote / Abort
+autonumber
+skinparam shadowing false
+
+participant "GitLab CI" as gitlab
+participant "Registry" as registry
+participant "GitOps Repo" as repo
+participant "ArgoCD" as argocd
+participant "Argo Rollouts" as rollouts
+participant "Gateway / Ingress" as gateway
+participant "Prometheus" as prometheus
+
+gitlab -> registry : build and push image
+gitlab -> repo : update image tag in rollout manifest
+repo -> argocd : new desired state
+argocd -> rollouts : apply Rollout
+rollouts -> gateway : set traffic weight 10% canary
+rollouts -> prometheus : run analysis checks
+
+alt Metrics healthy
+  rollouts -> gateway : set traffic weight 50%
+  rollouts -> prometheus : run analysis checks
+  rollouts -> gateway : set traffic weight 100%
+  rollouts -> rollouts : promote canary to stable
+else Metrics degraded
+  rollouts -> gateway : route 100% back to stable
+  rollouts -> rollouts : abort rollout / scale down canary
+end
+
+@enduml

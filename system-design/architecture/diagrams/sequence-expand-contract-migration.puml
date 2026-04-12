@@ -1,0 +1,34 @@
+@startuml
+title Expand / Contract Migration with Feature Toggle
+autonumber
+skinparam shadowing false
+
+participant "Migrator (Flyway/Liquibase)" as migrator
+database "Transaction DB" as db
+participant "Transaction Service" as transaction
+participant "Backfill Job" as backfill
+participant "Feature Flag Service" as flags
+participant "Payment Query Service" as query
+
+migrator -> db : expand schema\nadd provider_fee_amount,\nprovider_fee_currency nullable
+db --> migrator : done
+
+transaction -> db : dual write new fields for new payments
+backfill -> db : fill provider_fee_* for historical rows in batches
+db --> backfill : progress
+
+flags -> query : enable read-provider-fee-from-column=false
+query -> db : continue old read path
+
+... backfill reaches target coverage ...
+flags -> query : enable read-provider-fee-from-column=true
+query -> db : read provider_fee_* columns
+
+alt Need rollback
+  flags -> query : disable read-provider-fee-from-column
+  query -> db : return to old read path
+else Migration stable
+  migrator -> db : contract old fallback artifacts / tighten constraints
+end
+
+@enduml

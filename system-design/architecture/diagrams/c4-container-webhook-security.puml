@@ -1,0 +1,23 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+LAYOUT_LEFT_RIGHT()
+
+title Webhook Security - C4 Container
+
+System_Ext(provider, "External Provider", "Sends callbacks / webhooks")
+
+System_Boundary(platform, "Payment Processing Platform") {
+  Container(gateway, "API Gateway", "HTTPS", "HMAC validation, timestamp window, anti-replay")
+  Container(replayStore, "Replay Store", "Redis", "Stores eventId / nonce with TTL")
+  Container(callback, "Callback Service", "REST", "Normalizes callback payload")
+  Container(transaction, "Transaction Service", "REST", "Idempotent status update")
+  ContainerDb(transactionDb, "Transaction DB", "PostgreSQL", "payments, provider_callbacks")
+}
+
+Rel(provider, gateway, "POST callback", "HTTPS")
+Rel(gateway, replayStore, "SET NX EX eventId / nonce", "Redis")
+Rel(gateway, callback, "forward only validated callbacks", "REST")
+Rel(callback, transaction, "POST /internal/provider-results", "mTLS + service token")
+Rel(transaction, transactionDb, "dedupeKey + terminal state", "SQL")
+
+@enduml

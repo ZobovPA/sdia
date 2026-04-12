@@ -1,0 +1,26 @@
+@startuml
+title Vault Agent Injection and Secret Rotation
+autonumber
+skinparam shadowing false
+
+participant "Kubernetes" as k8s
+participant "Pod" as pod
+participant "Vault Agent" as agent
+participant "Vault" as vault
+participant "Transaction Service" as app
+
+k8s -> pod : start pod with service account
+pod -> agent : start sidecar
+agent -> vault : login via Kubernetes Auth
+vault --> agent : short-lived vault token
+agent -> vault : read provider_api_key,\nwebhook_secret_current,\nwebhook_secret_previous,\nDB creds
+vault --> agent : secrets
+agent -> app : render secrets to memory volume
+app -> app : load secrets on startup
+
+... rotation window ...
+vault -> agent : renew / refetch secret versions
+agent -> app : update rendered secrets\ncurrent + previous stay valid for overlap window
+app -> app : reload in-memory secret set\nwithout restart
+
+@enduml

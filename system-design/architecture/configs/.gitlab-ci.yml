@@ -1,0 +1,44 @@
+stages:
+  - lint
+  - test
+  - security
+  - build
+  - publish
+  - deploy
+
+variables:
+  IMAGE_NAME: registry.example.com/payments/platform
+  KUSTOMIZE_PATH: gitops/envs/prod
+
+lint:
+  stage: lint
+  script:
+    - ./gradlew spotlessCheck
+
+test:
+  stage: test
+  script:
+    - ./gradlew test
+
+security_scan:
+  stage: security
+  script:
+    - ./scripts/dependency-scan.sh
+    - ./scripts/container-scan.sh
+
+build_image:
+  stage: build
+  script:
+    - docker build -t "$IMAGE_NAME:$CI_COMMIT_SHA" .
+
+publish_image:
+  stage: publish
+  script:
+    - docker push "$IMAGE_NAME:$CI_COMMIT_SHA"
+
+update_gitops:
+  stage: deploy
+  script:
+    - ./scripts/update-image-tag.sh "$KUSTOMIZE_PATH" "$IMAGE_NAME:$CI_COMMIT_SHA"
+    - git commit -am "Deploy $CI_COMMIT_SHA"
+    - git push
