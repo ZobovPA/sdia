@@ -1,0 +1,41 @@
+@startuml
+title Webhook Validation + Anti-Replay + Idempotency
+autonumber
+skinparam shadowing false
+
+participant "External Provider" as provider
+participant "API Gateway" as gateway
+database "Replay Store (Redis)" as redis
+participant "Callback Service" as callback
+participant "Transaction Service" as transaction
+database "Transaction DB" as transactionDb
+
+alt Happy path
+  provider -> gateway : POST callback\nX-Signature, X-Timestamp, X-Event-Id, raw body
+  gateway -> gateway : verify HMAC(raw body + timestamp + eventId)
+  gateway -> gateway : check timestamp window <= 5m
+  gateway -> redis : SET NX EX replay:{provider}:{eventId}
+  redis --> gateway : inserted
+  gateway -> callback : normalized validated callback
+  callback -> transaction : POST /internal/provider-results\nservice token + dedupeKey
+  transaction -> transactionDb : tx: insert provider_callbacks +\ncheck terminal state + update payments
+  transactionDb --> transaction : commit
+  transaction --> callback : 200 accepted
+  callback --> gateway : 200 OK
+  gateway --> provider : 200 OK
+else Bad signature
+  provider -> gateway : POST callback
+  gateway -> gateway : signature mismatch
+  gateway --> provider : 401 Unauthorized
+else Stale timestamp
+  provider -> gateway : POST callback
+  gateway -> gateway : timestamp older than 5m
+  gateway --> provider : 401 Unauthorized
+else Duplicate eventId
+  provider -> gateway : POST callback
+  gateway -> redis : SET NX EX replay:{provider}:{eventId}
+  redis --> gateway : already exists
+  gateway --> provider : 202 Duplicate ignored
+end
+
+@enduml

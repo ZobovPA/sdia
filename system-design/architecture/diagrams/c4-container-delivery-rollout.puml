@@ -1,0 +1,27 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+LAYOUT_LEFT_RIGHT()
+
+title Safe Deployment - C4 Container
+
+System_Ext(gitlab, "GitLab CI", "Build, test, scan, update GitOps")
+System_Ext(registry, "Container Registry", "Stores images")
+System_Ext(argocd, "ArgoCD", "GitOps reconciler")
+System_Ext(rollouts, "Argo Rollouts", "Canary / blue-green controller")
+System_Ext(prometheus, "Prometheus", "Analysis metrics")
+
+System_Boundary(platform, "Payment Processing Platform on Kubernetes") {
+  Container(gateway, "API Gateway", "Kong / Ingress", "Routes traffic to stable/canary services")
+  Container(stable, "Stable Service", "Kubernetes Service", "Current production traffic")
+  Container(canary, "Canary Service", "Kubernetes Service", "Candidate release")
+}
+
+Rel(gitlab, registry, "push image", "OCI")
+Rel(gitlab, argocd, "update GitOps repo / manifests", "Git")
+Rel(argocd, rollouts, "apply Rollout resources", "Kubernetes API")
+Rel(rollouts, gateway, "update traffic weights", "Ingress / Gateway API")
+Rel(rollouts, stable, "manage stable replica set", "Kubernetes API")
+Rel(rollouts, canary, "manage canary replica set", "Kubernetes API")
+Rel(rollouts, prometheus, "analysis queries", "HTTP")
+
+@enduml

@@ -1,0 +1,54 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: transaction-service
+spec:
+  replicas: 6
+  strategy:
+    canary:
+      canaryService: transaction-service-canary
+      stableService: transaction-service-stable
+      trafficRouting:
+        nginx:
+          stableIngress: transaction-service
+      steps:
+        - setWeight: 10
+        - pause:
+            duration: 5m
+        - analysis:
+            templates:
+              - templateName: payment-error-rate
+              - templateName: payment-latency
+        - setWeight: 50
+        - pause:
+            duration: 10m
+        - analysis:
+            templates:
+              - templateName: payment-error-rate
+              - templateName: provider-timeout-rate
+        - setWeight: 100
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: transaction-service
+  template:
+    metadata:
+      labels:
+        app: transaction-service
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: app
+          image: registry.example.com/payments/transaction-service:latest
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 20"]

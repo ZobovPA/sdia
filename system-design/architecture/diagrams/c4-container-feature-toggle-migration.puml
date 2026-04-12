@@ -1,0 +1,23 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+LAYOUT_LEFT_RIGHT()
+
+title Feature Toggle DB Migration - C4 Container
+
+System_Ext(flagService, "Feature Flag Service", "Controls read switch")
+
+System_Boundary(platform, "Payment Processing Platform") {
+  Container(transaction, "Transaction Service", "REST + Kafka", "Dual writes provider fee fields")
+  Container(query, "Payment Query Service", "REST + Kafka", "Reads provider fee from old/new path")
+  Container(migrator, "Flyway / Liquibase Migrator", "Migration tool", "Runs expand/contract DDL")
+  Container(backfill, "Backfill Job", "Batch worker", "Fills new columns for historical rows")
+  ContainerDb(transactionDb, "Transaction DB", "PostgreSQL", "payments with provider_fee_*")
+}
+
+Rel(migrator, transactionDb, "expand / contract schema")
+Rel(transaction, transactionDb, "dual write old + new model")
+Rel(backfill, transactionDb, "batch update historical rows")
+Rel(query, transactionDb, "read old/new path")
+Rel(flagService, query, "toggle read-provider-fee-from-column")
+
+@enduml

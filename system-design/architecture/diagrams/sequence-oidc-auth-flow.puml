@@ -1,0 +1,31 @@
+@startuml
+title OIDC Authorization Code Flow + API Call
+autonumber
+skinparam shadowing false
+
+actor User as user
+participant "Browser / Mobile App" as client
+participant "API Gateway" as gateway
+participant "IdP" as idp
+participant "Orchestrator / API" as orchestrator
+participant "Wallet Service" as wallet
+
+user -> client : open app / create payment
+client -> gateway : GET /login
+gateway -> idp : redirect to authorize (PKCE)
+idp -> user : login + MFA
+user -> idp : credentials / consent
+idp -> gateway : callback with authorization code
+gateway -> idp : token exchange (code + verifier)
+idp --> gateway : access token + id token + refresh token
+gateway --> client : set session cookie / return authenticated state
+
+client -> gateway : POST /api/payments\n(session cookie or bearer token)
+gateway -> gateway : validate JWT / session\ncheck scopes payments:create
+gateway -> orchestrator : create payment + user claims
+orchestrator -> wallet : reserveFunds + service token + user context
+wallet --> orchestrator : paymentId + RESERVED
+orchestrator --> gateway : 202 Accepted
+gateway --> client : paymentId + RESERVED
+
+@enduml

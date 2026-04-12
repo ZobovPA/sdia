@@ -1,0 +1,25 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+LAYOUT_LEFT_RIGHT()
+
+title AuthN/AuthZ - C4 Container
+
+Person(user, "Пользователь", "Web / Mobile клиент")
+System_Ext(idp, "IdP", "OIDC / OAuth2 provider")
+
+System_Boundary(platform, "Payment Processing Platform") {
+  Container(gateway, "API Gateway", "Kong / HTTPS", "OIDC login, JWT validation, session, rate limit")
+  Container(orchestrator, "Orchestrator / API", "REST", "User-facing API and saga start")
+  Container(wallet, "Wallet Service", "REST + Kafka", "Reserve / commit / release")
+  Container(transaction, "Transaction Service", "REST + Kafka", "Provider flow and terminal events")
+  Container(query, "Payment Query Service", "REST + Kafka", "Read-model")
+}
+
+Rel(user, gateway, "Login, create payment, read status", "HTTPS")
+Rel(gateway, idp, "OIDC Authorization Code + PKCE, token exchange, JWKS", "HTTPS")
+Rel(gateway, orchestrator, "Validated user context", "REST")
+Rel(orchestrator, wallet, "reserveFunds + propagated user context", "mTLS + service token")
+Rel(orchestrator, query, "read status/history", "mTLS + service token")
+Rel(transaction, wallet, "commit/release", "mTLS + service token")
+
+@enduml
