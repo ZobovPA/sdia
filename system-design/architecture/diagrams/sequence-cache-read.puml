@@ -1,0 +1,38 @@
+@startuml
+title Cache-Aside Read Flow - Payment Status and History
+autonumber
+skinparam shadowing false
+
+actor Client as client
+participant "API Gateway" as gateway
+participant "Orchestrator / API" as orchestrator
+participant "Payment Query Service" as query
+database "Redis Cache" as redis
+database "Query DB" as queryDb
+
+group Cache hit
+  client -> gateway : GET /api/payments/{paymentId}
+  gateway -> orchestrator : get payment status
+  orchestrator -> query : get payment by id
+  query -> redis : GET payment:{paymentId}
+  redis --> query : cached projection
+  query --> orchestrator : payment status
+  orchestrator --> gateway : 200 OK
+  gateway --> client : response from cache
+end
+
+group Cache miss
+  client -> gateway : GET /api/users/{userId}/payments
+  gateway -> orchestrator : get payment history
+  orchestrator -> query : list payments by user
+  query -> redis : GET payments:user:{userId}:page:1
+  redis --> query : miss
+  query -> queryDb : SELECT payment_view by userId
+  queryDb --> query : result set
+  query -> redis : SET payments:user:{userId}:page:1 TTL=60s
+  query --> orchestrator : payment history
+  orchestrator --> gateway : 200 OK
+  gateway --> client : response from DB + cache warmup
+end
+
+@enduml

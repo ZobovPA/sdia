@@ -35,6 +35,40 @@
 
 Событие несёт полный стартовый слепок платежа для запуска саги и первичного построения read-модели.
 
+## `PaymentExpired`
+
+Источник: `Wallet Service`
+
+Потребители:
+
+- `Payment Query Service`
+
+```json
+{
+  "eventId": "019575e8-5a11-7b7d-bc11-56a1d0de91ef",
+  "eventType": "PaymentExpired",
+  "occurredAt": "2026-03-13T12:10:00Z",
+  "paymentId": "019575e6-5f08-7d34-84c2-d18a55e2d150",
+  "requestId": "8f61fd47-4ec1-4cd2-a3af-5f7b3b70d122",
+  "userId": "user-42",
+  "walletId": "wallet-42",
+  "merchantId": "merchant-77",
+  "merchantOrderId": "order-100500",
+  "providerId": "external-bank",
+  "recipientAccount": "40702810000000000001",
+  "amount": {
+    "currency": "RUB",
+    "value": 125000
+  },
+  "status": "EXPIRED",
+  "failureReason": "HOLD_EXPIRED_BEFORE_DISPATCH",
+  "createdAt": "2026-03-13T12:00:00Z",
+  "finishedAt": "2026-03-13T12:10:00Z"
+}
+```
+
+Событие публикуется только в защитном сценарии, когда резерв уже создан, но `PaymentInitiated` не вышел из `wallet_outbox` до истечения `hold_expires_at`.
+
 ## `PaymentCompleted`
 
 Источник: `Transaction Service`
@@ -43,6 +77,7 @@
 
 - `Wallet Service`
 - `Payment Query Service`
+- `Notifications Service`
 
 ```json
 {
@@ -78,6 +113,7 @@
 
 - `Wallet Service`
 - `Payment Query Service`
+- `Notifications Service`
 
 ```json
 {
@@ -112,8 +148,8 @@
 - `providerId` и `recipientAccount` приходят уже в `PaymentInitiated`, чтобы `Transaction Service` мог вызвать внешнего провайдера без чтения чужой БД
 - `providerTxnId` появляется только после инициирования внешней транзакции
 - `merchantOrderId` проходит через все business events и может использоваться в read-модели и сверке с мерчантом
-- `PaymentCompleted` и `PaymentFailed` содержат тот же базовый набор бизнес-полей, что и `PaymentInitiated`, чтобы поддерживать replay и восстановление read-модели
-- события терминальных статусов публикуются только `Transaction Service`
+- `PaymentCompleted`, `PaymentFailed` и `PaymentExpired` содержат тот же базовый набор бизнес-полей, что и `PaymentInitiated`, чтобы поддерживать replay и восстановление read-модели
+- терминальные события после внешнего провайдера публикуются `Transaction Service`; `PaymentExpired` является отдельным защитным событием `Wallet Service` для истёкшего hold до старта внешней части саги
 
 ## Идемпотентность подписчиков
 

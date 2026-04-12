@@ -4,7 +4,7 @@
 
 ## Основной документ
 
-- `system-design/architecture/payment-platform-architecture.md` - целевая архитектура, Saga, Outbox, Idempotency, CQRS
+- `system-design/architecture/payment-platform-architecture.md` - целевая архитектура, Saga, Outbox, Idempotency, CQRS, Resilience, Cache, DLQ и Observability
 
 ## Контракты
 
@@ -22,4 +22,8 @@
 - `system-design/architecture/diagrams/sequence-success.puml` - успешный сценарий платежа
 - `system-design/architecture/diagrams/sequence-failure-timeout.puml` - сценарий ошибки/таймаута и компенсации
 - `system-design/architecture/diagrams/sequence-callback-flow.puml` - поток callback-а провайдера
+- `system-design/architecture/diagrams/sequence-provider-resilience.puml` - таймауты, retry, circuit breaker и fallback
+- `system-design/architecture/diagrams/sequence-dlq-reprocessing.puml` - повторные ошибки consumer-а и уход в DLQ
+- `system-design/architecture/diagrams/sequence-cache-read.puml` - чтение через cache hit/miss
+- `system-design/architecture/diagrams/sequence-observability-flow.puml` - trace-id, метрики и логи по платёжному потоку
 - `system-design/architecture/diagrams/erd.puml` - ERD write/read моделей и outbox-таблиц

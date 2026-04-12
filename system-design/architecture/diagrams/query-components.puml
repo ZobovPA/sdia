@@ -2,29 +2,42 @@
 !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
 LAYOUT_LEFT_RIGHT()
 
-title Payment Query Service - C4 Component
+title Payment Query Service - C4 Component with Cache and Observability
 
 Container_Ext(orchestrator, "Orchestrator / API", "REST", "Читает историю и статус платежей")
-Container_Ext(kafka, "Kafka", "Message Broker", "Передаёт PaymentInitiated, PaymentCompleted, PaymentFailed")
+Container_Ext(kafka, "Kafka", "Message Broker", "Передаёт PaymentInitiated, PaymentCompleted, PaymentFailed, PaymentExpired")
+Container_Ext(redisExt, "Redis Cache", "Redis", "Cache-Aside слой для status/history")
+Container_Ext(alloy, "Grafana Alloy", "Telemetry Collector", "Собирает метрики, логи и трейсы")
 
 Container_Boundary(queryBoundary, "Payment Query Service") {
   Component(eventConsumer, "Projection Event Consumer", "Kafka consumer", "Получает доменные события платежей")
+  Component(retryGuard, "Retry / DLQ Policy", "Consumer policy", "Ограничивает число попыток и управляет replay / DLQ")
   Component(projectionBuilder, "Projection Builder", "Application Service", "Нормализует событие и обновляет projection")
   Component(queryApi, "Query API", "REST endpoint", "Возвращает статус платежа и историю пользователя")
+  Component(cachePolicy, "Cache Policy", "Application Service", "Cache-Aside, invalidate on terminal event")
   Component(processedEventsRepo, "Processed Events Repository", "Repository", "Проверяет dedupe по eventId")
   Component(paymentViewRepo, "Payment View Repository", "Repository", "Работает с payment_view")
+  Component(metrics, "Metrics / Trace Export", "OpenTelemetry", "Экспортирует latency, cache hit ratio, consumer lag")
   ContainerDb(queryDb, "Query DB", "PostgreSQL", "payment_view, query_processed_events")
 }
 
-Rel(kafka, eventConsumer, "PaymentInitiated / PaymentCompleted / PaymentFailed", "async")
-Rel(eventConsumer, projectionBuilder, "normalized event")
+Rel(kafka, eventConsumer, "PaymentInitiated / PaymentCompleted / PaymentFailed / PaymentExpired", "async")
+Rel(eventConsumer, retryGuard, "delivery attempt")
+Rel(retryGuard, projectionBuilder, "normalized event if retry budget remains")
 Rel(projectionBuilder, processedEventsRepo, "dedupe by eventId")
 Rel(projectionBuilder, paymentViewRepo, "upsert payment view")
+Rel(projectionBuilder, cachePolicy, "invalidate / warm cache")
 
 Rel(orchestrator, queryApi, "get payment by id / list by user", "REST")
-Rel(queryApi, paymentViewRepo, "read projections")
+Rel(queryApi, cachePolicy, "resolve status / history")
+Rel(cachePolicy, redisExt, "cache get/set")
+Rel(cachePolicy, paymentViewRepo, "read on cache miss")
 
 Rel(processedEventsRepo, queryDb, "reads/writes")
 Rel(paymentViewRepo, queryDb, "reads/writes")
+Rel(queryApi, metrics, "record query latency")
+Rel(eventConsumer, metrics, "record lag / failures")
+Rel(cachePolicy, metrics, "record cache hit ratio")
+Rel(metrics, alloy, "metrics/logs/traces")
 
 @enduml
